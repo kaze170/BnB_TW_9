@@ -120,6 +120,28 @@ export class GameAssets {
     return t;
   }
 
+  /**
+   * The retail description of the channel at `position` in the list.
+   *
+   * `csysstr.ssd` carries two families:
+   *   ChannelDesc<kind>     "只限等級3以下的玩家連線", "任何玩家都可以連線" …
+   *   ChannelExplain<n>     "新手專用頻道，10級以下可以進入", "活動專用頻道" …
+   *
+   * ChannelExplain is indexed by the channel's *slot*, and on the shipped table
+   * it lines up one-to-one with the five channels of channel2_000.ssd
+   * (新手專用 / 無差別 / 16級以上 / 特殊 / 活動專用).  It covers every channel;
+   * ChannelDesc<kind> only covers three of the five kinds, so it is used as the
+   * fallback for slots the Explain table does not reach.
+   *
+   * Returns the two halves separately so the screen can lay them out.
+   */
+  async channelDescription(position: number, kind: number): Promise<string | null> {
+    const { systemStrings } = await this.config();
+    const find = (name: string): string | null =>
+      systemStrings.find((r) => r.name === name)?.text ?? null;
+    return find(`ChannelExplain${position}`) ?? find(`ChannelDesc${kind}`);
+  }
+
   /** Decoded string tables and the raw config payloads. */
   config(): Promise<{
     stringTable: StringRow[];

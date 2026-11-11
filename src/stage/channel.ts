@@ -29,6 +29,8 @@ export const LIST_RECT = { x: 581, y: 80, w: 170, rowH: 23, rows: 13 } as const;
 export const WELL_RECT = { y: 421, h: 37, w: 100, x: [123, 228, 333] as const };
 const LIST = LIST_RECT;
 const WELL = WELL_RECT;
+/** The empty lower-right panel, where the selected channel's description goes. */
+export const DESC = { x: 578, y: 425, w: 208, h: 145 } as const;
 
 export type ChannelAction = 'enter' | 'bbs' | 'exit';
 
@@ -39,6 +41,8 @@ export class ChannelStage {
   private selected = 0;
   private hovered = -1;
   private onAction: ((action: ChannelAction, channel: ChannelInfo | null, index: number) => void) | null = null;
+  /** `ChannelDesc<kind>` text per channel, from csysstr.ssd. */
+  private descriptions: (string | null)[] = [];
 
   constructor(renderer: SpriteRenderer) {
     this.renderer = renderer;
@@ -52,6 +56,11 @@ export class ChannelStage {
   setChannels(channels: ChannelInfo[]): void {
     this.channels = channels.slice();
     this.selected = 0;
+  }
+
+  /** Attach the retail description strings (csysstr.ssd `ChannelDesc<kind>`). */
+  setDescriptions(descriptions: (string | null)[]): void {
+    this.descriptions = descriptions.slice();
   }
 
   get selectedChannel(): ChannelInfo | null {
@@ -108,6 +117,31 @@ export class ChannelStage {
 
     if (this.channels.length === 0) {
       drawText(ctx, '頻道清單載入中…', LIST.x + 4, LIST.y + 5, { size: 12, colour: '#c8e4ff' });
+      return;
+    }
+
+    // The description of the selected channel, in the lower-right panel the art
+    // leaves empty (x 575..790, y 420..570).
+    const desc = this.descriptions[this.selected];
+    if (desc) {
+      const words = desc.split('');
+      let line = '';
+      let y = 432;
+      const maxW = 200;
+      ctx.save();
+      for (const ch of words) {
+        const test = line + ch;
+        if (ctx.measureText(test).width > maxW && line) {
+          drawText(ctx, line, DESC.x, y, { size: 11, colour: '#ffffff' });
+          y += 15;
+          line = ch;
+        } else {
+          line = test;
+        }
+        if (y > DESC.y + DESC.h - 12) break;
+      }
+      if (line && y <= DESC.y + DESC.h - 12) drawText(ctx, line, DESC.x, y, { size: 11, colour: '#ffffff' });
+      ctx.restore();
     }
 
     // The three wells are painted empty by the art; label them the way the

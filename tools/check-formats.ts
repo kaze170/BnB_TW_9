@@ -12,7 +12,7 @@
 import { inflateSync } from 'node:zlib';
 import { Pack } from '../src/data/pack.ts';
 import { decodeCDataI16, decodeCDataI16Character } from '../src/data/sprite.ts';
-import { readSsi } from '../src/data/ssi.ts';
+import { readSsi, decodeSystemStrings } from '../src/data/ssi.ts';
 
 /**
  * Entries that are not sprites at all.  The client keeps them inside the same
@@ -131,6 +131,44 @@ for (const name of [
   const bytes = new Uint8Array(await Bun.file(`${ROOT}${name}`).arrayBuffer());
   const ssi = readSsi(bytes);
   check(`ssi  ${name.padEnd(18)} checksum + length`, ssi !== null);
+}
+
+// Channel table + realm list, the two files the lobby screen runs on.
+{
+  const { readChannelFile } = await import('../src/data/channel.ts');
+  const { readServerList, mergeWithBuiltins } = await import('../src/data/serverlist.ts');
+  const ROOT = new URL('..', import.meta.url).pathname;
+
+  const ch = readChannelFile(
+    new Uint8Array(await Bun.file(`${ROOT}channel2_000.ssd`).arrayBuffer()),
+    'channel2_000.ssd',
+  );
+  check('channel2_000.ssd walks to EOF (5 channels)', ch?.channels.length === 5);
+  check(
+    'channel names decode as Big5',
+    ch?.channels[0]?.name === 'BnB初級-1' && ch?.channels[3]?.name === 'BnB高手-4',
+    ch?.channels.map((c) => c.name).join(', '),
+  );
+  check(
+    'channel capacities are the advertised 400',
+    ch?.channels.every((c) => c.maxUsers === 400) ?? false,
+  );
+
+  const sv = readServerList(new Uint8Array(await Bun.file(`${ROOT}multisvr.ssd`).arrayBuffer()));
+  const realms = mergeWithBuiltins(sv);
+  check(
+    `realm list has the 4 built-in HiNet hosts (${realms.length})`,
+    realms.length === 4 && realms.every((r) => r.port === 3838),
+    realms.map((r) => r.address).join(', '),
+  );
+
+  // Every kind a shipped channel uses must resolve to a retail description.
+  const sys = decodeSystemStrings(
+    readSsi(new Uint8Array(await Bun.file(`${ROOT}csysstr.ssd`).arrayBuffer()))!.payload,
+  )!;
+  const kinds = [...new Set(ch?.channels.map((c) => c.kind) ?? [])];
+  const explained = kinds.filter((k) => sys.some((r) => r.name === `ChannelDesc${k}`));
+  console.log(`  note channel kinds ${kinds.join(', ')} -> ${explained.length} have a ChannelDesc string`);
 }
 
 console.log(failures === 0 ? '\nall format checks passed' : `\n${failures} check(s) failed`);

@@ -83,6 +83,10 @@ async function main(): Promise<void> {
         const list = decodeChannelList(body);
         log(`channels: ${list.map((c) => c.name).join(', ')}`);
         channel.setChannels(list);
+        // The retail text for each channel's kind, straight from csysstr.ssd.
+        void Promise.all(list.map((c, i) => assets.channelDescription(i, c.kind))).then((d) =>
+          channel.setDescriptions(d),
+        );
         return;
       }
       if (op === OP.JoinResult) {
