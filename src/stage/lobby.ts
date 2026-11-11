@@ -34,13 +34,14 @@ export const SCREEN_H = 600;
  *   title bar  y 11..38   small tag  x 10..57   room name  x 58..263
  *   bottom row y 46..68   three wells: x 15..99, x 100..220, x 224..265
  */
-export const SLOTS: { x: number; y: number; w: number; h: number }[] = (() => {
-  const xs = [24, 305] as const;
-  const ys = [102, 183, 264] as const;
-  const out: { x: number; y: number; w: number; h: number }[] = [];
-  for (const y of ys) for (const x of xs) out.push({ x, y, w: 278, h: 80 });
-  return out;
-})();
+export const SLOT_ORIGINS: readonly (readonly [number, number])[] = [
+  [26, 104], [26, 185], [26, 266],
+  [307, 104], [307, 185], [307, 266],
+] as const;
+
+export const SLOTS: { x: number; y: number; w: number; h: number }[] = SLOT_ORIGINS.map(
+  ([x, y]) => ({ x, y, w: 274, h: 76 }),
+);
 
 /** Where text goes inside one `BtSessionSlot` (slot-local pixels). */
 export const SLOT_FIELDS = {
@@ -54,19 +55,49 @@ export const SLOT_FIELDS = {
 /** BtSessionSlot frames. */
 export const SLOT_FRAME = { idle: 0, pressed: 1, hover: 2, selected: 3 } as const;
 
-/** Player list, right-hand column. */
-export const PLAYERS = { x: 640, y: 108, w: 132, rowH: 23, rows: 16 } as const;
+/**
+ * Player list, right-hand column.  `PLAYER_ORIGINS` is the executable's own
+ * table (dword_6158B0, sixteen pairs, x=643, y=111+23k) — the same array the
+ * lobby's draw loop walks with `cmp ..., 10h`.
+ *
+ * Inside one row the draw loop uses these offsets off the row origin:
+ *   x+0x27, y+2   the name
+ *   x+0x14, y+1   the level / icon
+ * so `name`/`level` below are those offsets, not guesses.
+ */
+export const PLAYER_ORIGINS: readonly (readonly [number, number])[] = Array.from(
+  { length: 16 },
+  (_, i) => [643, 111 + 23 * i] as const,
+);
+
+export const PLAYERS = { x: 643, y: 111, w: 132, rowH: 23, rows: 16 } as const;
+export const PLAYER_FIELDS = { level: { dx: 0x14, dy: 1 }, name: { dx: 0x27, dy: 2 } } as const;
 /** Chat panel. */
 export const CHAT = { x: 24, y: 400, w: 559, h: 120 } as const;
 /**
  * Two slots in the bottom bar.  The art draws exactly two wells there
- * (x 34..144 and 147..572, y 529..553); the first is the input line, the
- * second the button strip.  Nothing else in the bar is chrome.
+ * (x 34..144 and x 147..572, y 529..553): the narrow one is the input line,
+ * the wide one the button strip.
  */
 export const BAR = { y: 529, h: 24, wells: [
   { x: 34, w: 110 },
   { x: 147, w: 425 },
 ] as const };
+
+/**
+ * The buttons that go in the wide well.  These are the retail art buttons:
+ * their labels are painted into the sprites, so the stage draws the sprite
+ * and never writes text over it.  Frames are idle/pressed/disabled/hover/…
+ * and `BtExit` is 144x34 while the others are 68 tall — the row is anchored
+ * to the well's left edge in this order, which is the order the channel
+ * screen uses for the same three actions.
+ */
+export const LOBBY_BUTTONS = [
+  { name: 'Channel/BtCreate', w: 111, h: 68, action: 'create' as const },
+  { name: 'Channel/BtQuickJoin', w: 215, h: 68, action: 'quickjoin' as const },
+  { name: 'Channel/BtChannel', w: 111, h: 68, action: 'channel' as const },
+  { name: 'Channel/BtExit', w: 144, h: 34, action: 'exit' as const },
+];
 
 export interface RoomSlot {
   id: number;
@@ -183,8 +214,8 @@ export class LobbyStage {
           sy: f.sy,
           sw: f.sw,
           sh: f.sh,
-          dx: s.x + 2,
-          dy: s.y + 2,
+          dx: s.x,
+          dy: s.y,
           dw: f.sw,
           dh: f.sh,
         } satisfies DrawQuad);
@@ -198,7 +229,7 @@ export class LobbyStage {
     for (let i = 0; i < SLOTS.length; i++) {
       const s = SLOTS[i]!;
       const room = this.slots[i] ?? null;
-      const o = { x: s.x + 2, y: s.y + 2 };
+      const o = { x: s.x, y: s.y };
       if (!room) continue;
 
       // BtSessionSlot's inner fields, measured off the sheet.
@@ -223,15 +254,17 @@ export class LobbyStage {
       });
     }
 
-    // Player list.
-    for (let i = 0; i < Math.min(this.players.length, PLAYERS.rows); i++) {
+    // Player list, at the executable's row origins and inner offsets.
+    for (let i = 0; i < Math.min(this.players.length, PLAYER_ORIGINS.length); i++) {
       const p = this.players[i]!;
-      const y = PLAYERS.y + i * PLAYERS.rowH;
-      drawText(ctx, p.name, PLAYERS.x + 6, y + 4, { size: 12, colour: '#ffffff' });
-      drawText(ctx, String(p.level), PLAYERS.x + PLAYERS.w - 6, y + 4, {
+      const [rx, ry] = PLAYER_ORIGINS[i]!;
+      drawText(ctx, p.name, rx + PLAYER_FIELDS.name.dx, ry + PLAYER_FIELDS.name.dy, {
+        size: 12,
+        colour: '#ffffff',
+      });
+      drawText(ctx, String(p.level), rx + PLAYER_FIELDS.level.dx, ry + PLAYER_FIELDS.level.dy, {
         size: 11,
         colour: '#bfe0ff',
-        align: 'right',
       });
     }
 

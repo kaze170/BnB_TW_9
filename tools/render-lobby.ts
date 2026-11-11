@@ -10,7 +10,7 @@
  */
 
 import { Pack } from '../src/data/pack.ts';
-import { SLOTS, SLOT_FIELDS, PLAYERS, CHAT, BAR, SCREEN_W, SCREEN_H } from '../src/stage/lobby.ts';
+import { SLOTS, SLOT_FIELDS, PLAYER_ORIGINS, PLAYER_FIELDS, CHAT, BAR, SCREEN_W, SCREEN_H } from '../src/stage/lobby.ts';
 import { decodeCDataI16Character, sheetToRGBA } from '../src/data/sprite.ts';
 import { encodePNG } from './ppm2png.ts';
 
@@ -85,7 +85,7 @@ async function main(): Promise<void> {
   };
   for (let i = 0; i < SLOTS.length; i++) {
     const r = sheet.rects[i === 0 ? 3 : i === 1 ? 2 : 0]!;
-    blit(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0, SLOTS[i]!.x + 2, SLOTS[i]!.y + 2);
+    blit(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0, SLOTS[i]!.x, SLOTS[i]!.y);
   }
   const wash = (
     x: number,
@@ -114,11 +114,8 @@ async function main(): Promise<void> {
       wash(s.x, s.y, s.w, 2, [255, 40, 40, 255]);
       console.log(`  slot ${i}: ${s.x},${s.y} ${s.w}x${s.h}`);
     }
-    wash(PLAYERS.x, PLAYERS.y, 2, PLAYERS.rowH * PLAYERS.rows, [255, 200, 0, 255]);
-    for (let i = 0; i < PLAYERS.rows; i++) {
-      wash(PLAYERS.x, PLAYERS.y + i * PLAYERS.rowH, 6, 1, [255, 200, 0, 255]);
-    }
-    console.log(`players x=${PLAYERS.x} y=${PLAYERS.y} rowH=${PLAYERS.rowH} rows=${PLAYERS.rows}`);
+    for (const [px, py] of PLAYER_ORIGINS) wash(px, py, 6, 1, [255, 200, 0, 255]);
+    console.log(`players ${PLAYER_ORIGINS.length} rows at x=${PLAYER_ORIGINS[0]![0]} y=${PLAYER_ORIGINS[0]![1]}..${PLAYER_ORIGINS[15]![1]}`);
     wash(CHAT.x, CHAT.y, CHAT.w, 1, [0, 255, 120, 255]);
     wash(CHAT.x, CHAT.y, 1, CHAT.h, [0, 255, 120, 255]);
     console.log(`chat ${CHAT.x},${CHAT.y} ${CHAT.w}x${CHAT.h}`);
@@ -135,7 +132,7 @@ async function main(): Promise<void> {
     { name: 'Room 6', map: 'Ghost Castle', state: '遊戲中', players: 0, capacity: 8 },
   ];
   const inputLine = '_';
-  const players = Array.from({ length: PLAYERS.rows }, (_, i) => ({
+  const players = Array.from({ length: PLAYER_ORIGINS.length }, (_, i) => ({
     name: `player${i + 1}`,
     level: 1 + ((i * 7) % 20),
   }));
@@ -144,7 +141,7 @@ async function main(): Promise<void> {
   for (let i = 0; i < rooms.length; i++) {
     const s = SLOTS[i]!;
     const r = rooms[i]!;
-    const o = { x: s.x + 2, y: s.y + 2 };
+    const o = { x: s.x, y: s.y };
     ops.push({
       text: r.name,
       x: o.x + SLOT_FIELDS.name.x + 6,
@@ -180,15 +177,22 @@ async function main(): Promise<void> {
   }
   for (let i = 0; i < players.length; i++) {
     const p = players[i]!;
-    const y = PLAYERS.y + i * PLAYERS.rowH;
-    ops.push({ text: p.name, x: PLAYERS.x + 6, y: y + 4, size: 12, colour: '#ffffff', align: 'left' });
+    const [rx, ry] = PLAYER_ORIGINS[i]!;
+    ops.push({
+      text: p.name,
+      x: rx + PLAYER_FIELDS.name.dx,
+      y: ry + PLAYER_FIELDS.name.dy,
+      size: 12,
+      colour: '#ffffff',
+      align: 'left',
+    });
     ops.push({
       text: String(p.level),
-      x: PLAYERS.x + PLAYERS.w - 6,
-      y: y + 4,
+      x: rx + PLAYER_FIELDS.level.dx,
+      y: ry + PLAYER_FIELDS.level.dy,
       size: 11,
       colour: '#bfe0ff',
-      align: 'right',
+      align: 'left',
     });
   }
   ops.push({
