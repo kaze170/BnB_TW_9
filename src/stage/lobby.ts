@@ -20,6 +20,7 @@
 
 import type { DrawQuad, SpriteRenderer } from '../gfx/renderer.ts';
 import { drawText } from '../ui/text.ts';
+import type { MapInfo } from '../data/mapinfo.ts';
 
 export const SCREEN_W = 800;
 export const SCREEN_H = 600;
@@ -114,7 +115,8 @@ export interface RoomSlot {
   capacity: number;
   /** locked / playing / waiting — server-defined */
   state: 'waiting' | 'playing' | 'locked';
-  map: string;
+  /** Index into fxdynmapinfo.ssd; the stage resolves it to a name and art. */
+  map: number;
 }
 
 export interface LobbyPlayer {
@@ -140,6 +142,8 @@ export class LobbyStage {
   private hovered: number | null = null;
   private chat: string[] = [];
   private input = '';
+  /** fxdynmapinfo.ssd, keyed by index. */
+  private maps = new Map<number, MapInfo>();
   private onAction: ((action: LobbyAction, slot: RoomSlot | null) => void) | null = null;
   private onJoin: ((slot: RoomSlot) => void) | null = null;
 
@@ -169,6 +173,11 @@ export class LobbyStage {
     this.slots = slots.slice(0, SLOTS.length);
     while (this.slots.length < SLOTS.length) this.slots.push(null);
     if (this.selected >= this.slots.length) this.selected = 0;
+  }
+
+  /** The shipped map table, so room slots can name and illustrate their map. */
+  setMaps(maps: MapInfo[]): void {
+    this.maps = new Map(maps.map((m) => [m.index, m]));
   }
 
   setPlayers(players: LobbyPlayer[]): void {
@@ -244,10 +253,14 @@ export class LobbyStage {
         size: 13,
         colour: '#ffffff',
       });
-      drawText(ctx, room.map, o.x + SLOT_FIELDS.field1.x + 6, o.y + SLOT_FIELDS.field1.y + 5, {
-        size: 11,
-        colour: '#dff0ff',
-      });
+      const map = this.maps.get(room.map);
+      drawText(
+        ctx,
+        map?.description ?? '',
+        o.x + SLOT_FIELDS.field1.x + 6,
+        o.y + SLOT_FIELDS.field1.y + 5,
+        { size: 11, colour: '#dff0ff' },
+      );
       const stateText =
         room.state === 'playing' ? '遊戲中' : room.state === 'locked' ? '密碼' : '等待中';
       drawText(ctx, stateText, o.x + SLOT_FIELDS.field2.x + 6, o.y + SLOT_FIELDS.field2.y + 5, {

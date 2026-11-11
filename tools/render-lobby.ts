@@ -12,6 +12,8 @@
 import { Pack } from '../src/data/pack.ts';
 import { SLOTS, SLOT_FIELDS, PLAYER_ORIGINS, PLAYER_FIELDS, CHAT, BAR, SCREEN_W, SCREEN_H } from '../src/stage/lobby.ts';
 import { decodeCDataI16Character, sheetToRGBA } from '../src/data/sprite.ts';
+import { readSsi } from '../src/data/ssi.ts';
+import { parseMapInfo } from '../src/data/mapinfo.ts';
 import { encodePNG } from './ppm2png.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -123,14 +125,20 @@ async function main(): Promise<void> {
     console.log(`bar y=${BAR.y} h=${BAR.h} wells ${BAR.wells.map((w) => `${w.x}+${w.w}`).join(', ')}`);
   }
 
-  const rooms = [
-    { name: 'Room 1', map: 'BnB Town', state: '等待中', players: 1, capacity: 8 },
-    { name: 'Room 2', map: 'Forest', state: '等待中', players: 2, capacity: 8 },
-    { name: 'Room 3', map: 'Desert', state: '等待中', players: 1, capacity: 8 },
-    { name: 'Room 4', map: 'Ice Field', state: '遊戲中', players: 0, capacity: 8 },
-    { name: 'Room 5', map: 'Pirate Ship', state: '遊戲中', players: 0, capacity: 8 },
-    { name: 'Room 6', map: 'Ghost Castle', state: '遊戲中', players: 0, capacity: 8 },
-  ];
+  // The same map indices the gateway hands out; names come from the shipped table.
+  const mapFile = parseMapInfo(
+    readSsi(new Uint8Array(await Bun.file(`${ROOT}fxdynmapinfo.ssd`).arrayBuffer()))!.payload,
+  )!;
+  const mapName = (index: number): string =>
+    mapFile.maps.find((m) => m.index === index)?.description ?? `#${index}`;
+  const MAP_INDEX = [3, 25, 44, 79, 98, 193];
+  const rooms = MAP_INDEX.map((idx, i) => ({
+    name: `Room ${i + 1}`,
+    map: mapName(idx),
+    state: i < 3 ? '等待中' : '遊戲中',
+    players: i < 3 ? 1 + (i % 2) : 0,
+    capacity: 8,
+  }));
   const inputLine = '_';
   const players = Array.from({ length: PLAYER_ORIGINS.length }, (_, i) => ({
     name: `player${i + 1}`,

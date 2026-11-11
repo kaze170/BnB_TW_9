@@ -16,6 +16,7 @@
 
 import { GameSocket, OP, decodeChannelList, decodeRoomList } from '../src/net/client.ts';
 import { readSsi, decodeSystemStrings } from '../src/data/ssi.ts';
+import { parseMapInfo } from '../src/data/mapinfo.ts';
 
 function str16At(bytes: Uint8Array, off: number): string {
   const n = (bytes[off]! << 8) | bytes[off + 1]!;
@@ -173,6 +174,16 @@ check(
   result.rooms.every((r) => r.players <= r.capacity && r.capacity > 0 && r.name !== ''),
 );
 check('entering a room was accepted', result.enterOk, `slot ${result.enterSlot}`);
+
+const mapFile = parseMapInfo(
+  readSsi(new Uint8Array(await Bun.file(new URL('../fxdynmapinfo.ssd', import.meta.url)).arrayBuffer()))!.payload,
+)!;
+check(
+  'every room names a real fxdynmapinfo map',
+  result.rooms.length === 6 &&
+    result.rooms.every((r) => mapFile.maps.some((m) => m.index === r.map && !m.random)),
+  result.rooms.map((r) => `${r.map}:${mapFile.maps.find((m) => m.index === r.map)?.description ?? '?'}`).join(', '),
+);
 
 const sysRows = decodeSystemStrings(
   readSsi(new Uint8Array(await Bun.file(new URL('../csysstr.ssd', import.meta.url)).arrayBuffer()))!.payload,

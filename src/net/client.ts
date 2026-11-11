@@ -57,7 +57,8 @@ export interface RoomInfo {
   players: number;
   capacity: number;
   state: number;
-  map: string;
+  /** Index into fxdynmapinfo.ssd (1-based). */
+  map: number;
 }
 
 /** Decode a RoomList body. */
@@ -72,7 +73,7 @@ export function decodeRoomList(body: Uint8Array): RoomInfo[] {
     const players = r.u16();
     const capacity = r.u16();
     const state = r.u8();
-    const map = text.decode(r.str16());
+    const map = r.u16();
     out.push({ slot, name, players, capacity, state, map });
   }
   return out;

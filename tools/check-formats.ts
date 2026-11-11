@@ -169,6 +169,32 @@ for (const name of [
   const kinds = [...new Set(ch?.channels.map((c) => c.kind) ?? [])];
   const explained = kinds.filter((k) => sys.some((r) => r.name === `ChannelDesc${k}`));
   console.log(`  note channel kinds ${kinds.join(', ')} -> ${explained.length} have a ChannelDesc string`);
+
+  // fxdynmapinfo.ssd — the map table the lobby's room slots draw from.
+  const { parseMapInfo } = await import('../src/data/mapinfo.ts');
+  const mi = parseMapInfo(
+    readSsi(new Uint8Array(await Bun.file(`${ROOT}fxdynmapinfo.ssd`).arrayBuffer()))!.payload,
+  );
+  check(`fxdynmapinfo.ssd parses every record (${mi?.count ?? 0})`, mi?.count === 240 && mi.maps.length === 240);
+  check(
+    'map records are indexed 1..240 in order',
+    mi?.maps.every((m, i) => m.index === i + 1) ?? false,
+  );
+  check(
+    'map descriptions decode as Big5',
+    mi?.maps[2]?.description === '藏寶地圖00' && mi?.maps[239]?.description === '聖誕場景10',
+    mi?.maps[2]?.description,
+  );
+  check(
+    'the map families are the shipped fourteen',
+    [...new Set(mi?.maps.map((m) => m.family) ?? [])].length === 14,
+    [...new Set(mi?.maps.map((m) => m.family) ?? [])].join(','),
+  );
+  check(
+    'Random placeholders are flagged and playable maps are not',
+    mi?.maps.filter((m) => m.random).length === 14 &&
+      mi.maps.filter((m) => !m.random).length === 226,
+  );
 }
 
 console.log(failures === 0 ? '\nall format checks passed' : `\n${failures} check(s) failed`);

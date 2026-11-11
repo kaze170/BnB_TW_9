@@ -127,6 +127,9 @@ async function main(): Promise<void> {
     if (!lobbyReady) {
       const art = await assets.image('Fx', 'Channel/CAStage');
       if (art) lobby.setBackground(art);
+      // The room slots name their map from the shipped table, not the wire.
+      const mapFile = await assets.mapInfo();
+      if (mapFile) lobby.setMaps(mapFile.maps);
       const slotSheet = await assets.sheet('Fx', 'Channel/BtSessionSlot');
       const slotTex = await assets.texture('Fx', 'Channel/BtSessionSlot');
       if (slotSheet && slotTex) {

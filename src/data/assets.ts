@@ -17,6 +17,7 @@ import {
   type SpriteSheet,
 } from './sprite.ts';
 import { readSsi, decodeStringTable, decodeSystemStrings, type StringRow, type SystemStringRow } from './ssi.ts';
+import { parseMapInfo, type MapInfoFile } from './mapinfo.ts';
 
 export type PackName = 'SkinRsc' | 'SkinDsc' | 'Cx' | 'Fx' | 'CharTE' | 'EmoTE';
 
@@ -32,6 +33,7 @@ export class GameAssets {
   private readonly packs = new Map<PackName, Promise<Pack>>();
   private readonly sheets = new Map<string, Promise<SpriteSheet | null>>();
   private readonly textures = new Map<string, Promise<ImageBitmap | null>>();
+  private mapInfos?: Promise<MapInfoFile | null>;
   private configs?: Promise<{
     stringTable: StringRow[];
     systemStrings: SystemStringRow[];
@@ -140,6 +142,22 @@ export class GameAssets {
     const find = (name: string): string | null =>
       systemStrings.find((r) => r.name === name)?.text ?? null;
     return find(`ChannelExplain${position}`) ?? find(`ChannelDesc${kind}`);
+  }
+
+  /** `fxdynmapinfo.ssd`, decoded. */
+  async mapInfo(): Promise<MapInfoFile | null> {
+    if (!this.mapInfos) {
+      this.mapInfos = (async () => {
+        try {
+          const bytes = await fetchBytes(`${this.base}/fxdynmapinfo.ssd`);
+          const ssi = readSsi(bytes);
+          return ssi ? parseMapInfo(ssi.payload) : null;
+        } catch {
+          return null;
+        }
+      })();
+    }
+    return this.mapInfos;
   }
 
   /**

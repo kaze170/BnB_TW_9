@@ -24,7 +24,7 @@
  *   0x17  S -> C  enter result,            u8 ok, u16 slot, str16(message)
  *
  * Room record:
- *   u16 slot, str16 name, u16 players, u16 capacity, u8 state, str16 map
+ *   u16 slot, str16 name, u16 players, u16 capacity, u8 state, u16 map index
  *
  * EnterResult and JoinResult carry a *key* into the client's csysstr.ssd, not
  * a human sentence: the retail client looks the message up itself, and those
@@ -87,18 +87,21 @@ export interface Room {
   players: number;
   capacity: number;
   state: RoomState;
-  map: string;
+  map: number;
 }
 
 export const SLOT_COUNT = 6;
 
 /**
- * Map names are ASCII: the client can *decode* Big5 but nothing here can
- * *encode* it, so a Chinese label authored on the server would arrive as
- * mojibake.  The retail map names live in the client's own data
- * (fxdynmapinfo.ssd) and are drawn from there, not sent over the wire.
+ * Rooms carry a map *index* into fxdynmapinfo.ssd, not a map name.
+ *
+ * The client already has all 240 map records (see src/data/mapinfo.ts), so
+ * sending the index keeps the localised name ("藏寶地圖00") and the thumbnail
+ * exactly as shipped, and sidesteps the fact that this runtime can decode Big5
+ * but not encode it.  Indices below are the first playable map of six of the
+ * shipped families: Bula, Cemetery, Desert, Forest, Ice, Tomb.
  */
-const MAPS = ['BnB Town', 'Forest', 'Desert', 'Ice Field', 'Pirate Ship', 'Ghost Castle'];
+const MAP_INDEX = [3, 25, 44, 79, 98, 193];
 
 function blankRooms(): Room[] {
   return Array.from({ length: SLOT_COUNT }, (_, slot) => ({
@@ -107,7 +110,7 @@ function blankRooms(): Room[] {
     players: slot < 3 ? 1 + (slot % 2) : 0,
     capacity: 8,
     state: (slot < 3 ? 0 : 1) as RoomState,
-    map: MAPS[slot % MAPS.length]!,
+    map: MAP_INDEX[slot % MAP_INDEX.length]!,
   }));
 }
 
@@ -252,7 +255,7 @@ export function sendRooms(peer: PeerSocket): void {
     w.u16(r.players);
     w.u16(r.capacity);
     w.u8(r.state);
-    str(w, r.map);
+    w.u16(r.map);
   }
   peer.send(OP.RoomList, w.finish());
 }
