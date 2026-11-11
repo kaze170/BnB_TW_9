@@ -22,7 +22,7 @@ export interface TextStyle {
 
 const FONT = '"Dotum", "돋움", "Gulim", "굴림", sans-serif';
 
-/** Draw already-decoded cp949 text (a JS string) with the client's font chain. */
+/** Draw already-decoded Big5 text (a JS string) with the client's font chain. */
 export function drawText(
   ctx: CanvasRenderingContext2D,
   text: string,

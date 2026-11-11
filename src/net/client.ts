@@ -24,9 +24,51 @@ export const OP = {
   Login: 0x10,
   /** server -> client: login result, body = u8 ok, str16(message) */
   LoginResult: 0x11,
-  /** server -> client: channel list, body = u16 count, count * str16(name) */
+  /**
+   * server -> client: channel list, body = u16 count, then per channel
+   *   str16 name, u16 maxUsers, u16 users, u8 kind, u16 group, u8 index
+   * (the fields of the `channel2_NNN.ssd` record, so nothing is invented)
+   */
   ChannelList: 0x12,
+  /**
+   * client -> server: join channel, body = u16 channel index
+   *
+   * An index, not a name: the client has no Big5 codec to *encode* with (the
+   * runtime ships a Big5 decoder only), and the retail protocol is binary
+   * anyway.  The index is the position in the ChannelList the server sent.
+   */
+  JoinChannel: 0x13,
+  /** server -> client: join result, body = u8 ok, u16 channelId, str16(message) */
+  JoinResult: 0x14,
 } as const;
+
+/** One channel row, as carried by ChannelList. */
+export interface ChannelInfo {
+  name: string;
+  maxUsers: number;
+  users: number;
+  kind: number;
+  group: number;
+  index: number;
+}
+
+/** Decode a ChannelList body. */
+export function decodeChannelList(body: Uint8Array): ChannelInfo[] {
+  const r = new PacketReader(body);
+  const count = r.u16();
+  const out: ChannelInfo[] = [];
+  const text = new TextDecoder('big5');
+  for (let i = 0; i < count; i++) {
+    const name = text.decode(r.str16());
+    const maxUsers = r.u16();
+    const users = r.u16();
+    const kind = r.u8();
+    const group = r.u16();
+    const index = r.u8();
+    out.push({ name, maxUsers, users, kind, group, index });
+  }
+  return out;
+}
 
 export interface SocketEvents {
   open?: () => void;
@@ -106,6 +148,12 @@ export class GameSocket {
   send(op: number, body: Uint8Array = new Uint8Array(0)): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     this.ws.send(encodeFrame(op, body, this.cipher));
+  }
+
+  joinChannel(index: number): void {
+    const w = new PacketWriter();
+    w.u16(index);
+    this.send(OP.JoinChannel, w.finish());
   }
 
   login(id: string, pass: string): void {

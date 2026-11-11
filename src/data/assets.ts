@@ -96,6 +96,30 @@ export class GameAssets {
     return t;
   }
 
+  /**
+   * A pack entry that is a whole image rather than a CDataI16 sheet.  Several
+   * screens ship as JPEGs inside the packs (`Cx`'s `StageChannel/CAStage` is
+   * the 800x600 channel screen, SkinRsc's `LoginStageBack.jpg` the login one);
+   * the client hands them straight to the JPEG decoder, and so do we.
+   */
+  async image(pack: PackName, name: string): Promise<ImageBitmap | null> {
+    const key = `img:${pack}:${name}`;
+    let t = this.textures.get(key);
+    if (!t) {
+      t = (async () => {
+        const p = await this.pack(pack);
+        const payload = p.payload(name);
+        if (!payload || payload.length < 4) return null;
+        // SOI marker: the pack never compresses these, they are stored as-is.
+        if (payload[0] !== 0xff || payload[1] !== 0xd8) return null;
+        const blob = new Blob([payload as unknown as BlobPart], { type: 'image/jpeg' });
+        return createImageBitmap(blob);
+      })();
+      this.textures.set(key, t);
+    }
+    return t;
+  }
+
   /** Decoded string tables and the raw config payloads. */
   config(): Promise<{
     stringTable: StringRow[];

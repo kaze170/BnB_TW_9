@@ -103,8 +103,13 @@ const server = Bun.serve({
 
 // --- lobby (wire format: src/net/protocol.ts; behaviour: server/gateway.ts) --
 import { Lobby } from '../src/net/lobby.ts';
-import { attachGateway } from './gateway.ts';
+import { attachGateway, loadRetailData, retailChannels, retailEndpoints } from './gateway.ts';
 const lobby = new Lobby();
 attachGateway(lobby);
+await loadRetailData();
 
 console.log(`dev server on http://0.0.0.0:${server.port}  (public=${existsSync(PUBLIC) ? 'ok' : 'missing'})`);
+console.log(
+  `retail data: ${retailChannels().length} channels (${retailChannels().map((c) => c.name).join(', ')}), ` +
+    `${retailEndpoints().length} realm endpoints`,
+);

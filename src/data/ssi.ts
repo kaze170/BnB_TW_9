@@ -102,18 +102,26 @@ export function writeSsiRaw(payload: Uint8Array): Uint8Array {
 
 /**
  * `stringtable.ini` layout (the only file in the shipped set that uses it):
- *   u16 count, count * { u32 id, u32 len, bytes text }   (cp950 / Big5)
+ *   u16 count, count * { u32 id, u32 len, bytes text }   (Big5 / CP950)
  */
 export interface StringRow {
   id: number;
   text: string;
 }
 
-const CP950 = new TextDecoder('big5', { fatal: false });
+/**
+ * This build is the Taiwan release: every string table, channel name and
+ * system message in the shipped data is Big5 (CP950), not EUC-KR.  Verified by
+ * decoding the channel list ("BnB初級-1", "BnB高手-4") and csysstr.ssd.
+ */
+const BIG5 = new TextDecoder('big5', { fatal: false });
 
-export function decodeCp950(bytes: Uint8Array): string {
-  return CP950.decode(bytes);
+export function decodeBig5(bytes: Uint8Array): string {
+  return BIG5.decode(bytes);
 }
+
+/** Kept for the call sites that still spell it CP950. */
+export const decodeCp950 = decodeBig5;
 
 export function decodeStringTable(payload: Uint8Array): StringRow[] | null {
   if (payload.length < 2) return null;
@@ -128,7 +136,7 @@ export function decodeStringTable(payload: Uint8Array): StringRow[] | null {
     const len = dv.getUint32(off + 4, true);
     off += 8;
     if (len > payload.length - off) return null;
-    rows.push({ id, text: CP950.decode(payload.subarray(off, off + len)) });
+    rows.push({ id, text: BIG5.decode(payload.subarray(off, off + len)) });
     off += len;
   }
   if (off !== payload.length) return null;
@@ -157,13 +165,13 @@ export function decodeSystemStrings(payload: Uint8Array): SystemStringRow[] | nu
     const nlen = dv.getUint32(off, true);
     off += 4;
     if (nlen > payload.length - off) return null;
-    const name = CP950.decode(payload.subarray(off, off + nlen));
+    const name = BIG5.decode(payload.subarray(off, off + nlen));
     off += nlen;
     if (off + 4 > payload.length) return null;
     const tlen = dv.getUint32(off, true);
     off += 4;
     if (tlen > payload.length - off) return null;
-    rows.push({ name, text: CP950.decode(payload.subarray(off, off + tlen)) });
+    rows.push({ name, text: BIG5.decode(payload.subarray(off, off + tlen)) });
     off += tlen;
   }
   if (off !== payload.length) return null;

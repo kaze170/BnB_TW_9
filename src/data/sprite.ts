@@ -262,12 +262,18 @@ export function decodeCDataI16(buf: Uint8Array): SpriteSheet | null {
   if (variant === 2) return decodeCDataI16Image(buf);
   if (variant !== 1) return null;
   if (count < 1 || count > 8192) return null;
-  const sheetW = u32(dv, 12);
+  // Header: u32 count, u32 variant(=1), u32 sheetWidth, u32 sheetHeight.
+  // The obvious reading is the right one, cross-checked against a known sheet:
+  // Etc/LevelIcons is 224 wide (90 lines of 16x14 icons) and +8 is the 224.
+  // Both dimensions divide the stream exactly, so the frame rects settle it:
+  // no frame may exceed the header dimensions.
+  const sheetW = u32(dv, 8);
+  const sheetHdr = u32(dv, 12);
   const tableEnd = 16 + 28 * count;
   if (tableEnd + 4 > buf.length) return null;
 
   const rects: SpriteRect[] = [];
-  let sheetH = 0;
+  let maxY = 0;
   for (let i = 0; i < count; i++) {
     const o = 16 + 28 * i;
     const r: SpriteRect = {
@@ -283,7 +289,7 @@ export function decodeCDataI16(buf: Uint8Array): SpriteSheet | null {
       pad: 0,
     };
     rects.push(r);
-    if (r.y1 > sheetH) sheetH = r.y1;
+    if (r.y1 > maxY) maxY = r.y1;
   }
   const pixSize = u32(dv, tableEnd);
   if (tableEnd + 4 + pixSize !== buf.length) return null;
@@ -293,10 +299,18 @@ export function decodeCDataI16(buf: Uint8Array): SpriteSheet | null {
   // wide and holds 90 lines of 16x14 icons whose rects only describe y<=223.
   // The sheet is as tall as the run stream yields, so decode once with an upper
   // bound and keep the height that consumes the stream exactly.
+  if (sheetHdr > 0 && sheetHdr < 32768 && maxY > sheetHdr) {
+    // A frame cannot be taller than its sheet; if the header disagrees with the
+    // frame rects, the header is the one that is wrong.
+    return null;
+  }
   const stream = buf.subarray(tableEnd + 4, tableEnd + 4 + pixSize);
-  const maxRows = Math.max(sheetH, Math.ceil(((stream.length / 2) * 3) / sheetW) + 4);
+  // Decode with the header height when it is consistent, otherwise let the
+  // stream decide (the packer truncates trailing transparent lines).
+  const maxRows = sheetHdr > 0 && sheetHdr < 32768 ? Math.max(sheetHdr, maxY) : Math.max(maxY, 1) + 4096;
   let res = decodeDepth4(stream, sheetW, maxRows, true);
   let rows = Math.max(1, Math.round(res.written / sheetW));
+  if (sheetHdr > 0 && sheetHdr < 32768 && rows >= sheetHdr) rows = sheetHdr;
   if (rows < maxRows && res.partial === 0) {
     const tuned = decodeDepth4(stream, sheetW, rows, true);
     if (tuned.written === rows * sheetW) {

@@ -64,7 +64,7 @@ export class PacketWriter {
     return this;
   }
 
-  /** sub_565340: u16 length + cp949 bytes (caller encodes). */
+  /** sub_565340: u16 length + Big5 bytes (caller encodes). */
   str(v: Uint8Array): this {
     this.u16(v.length);
     return this.bytes(v);
