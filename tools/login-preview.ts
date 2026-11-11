@@ -13,6 +13,7 @@ import { decodeCDataI16, sheetToRGBA, type SpriteSheet } from '../src/data/sprit
 
 import { parseSkinDsc, PANE } from '../src/ui/skindsc.ts';
 import { SKIN } from '../src/ui/skinrsc.ts';
+import { EDIT_WELLS } from '../src/stage/login.ts';
 import { encodePNG } from './ppm2png.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -90,7 +91,65 @@ async function main(): Promise<void> {
     console.log(`back ${ppm.w}x${ppm.h}`);
   }
 
-  const buttonKey: Record<string, keyof typeof SKIN> = {
+  /** Blit one frame of a sheet (the 48-byte rect records slice the bitmap). */
+  const blitFrame = (layer: Layer, frame: number, x: number, y: number): void => {
+    const r = layer.sheet.rects[frame];
+    if (!r) return;
+    const sw = r.x1 - r.x0;
+    const sh = r.y1 - r.y0;
+    const sub = new Uint8ClampedArray(sw * sh * 4);
+    for (let cy = 0; cy < sh; cy++) {
+      const so = ((r.y0 + cy) * layer.sheet.sheetW + r.x0) * 4;
+      sub.set(layer.rgba.subarray(so, so + sw * 4), cy * sw * 4);
+    }
+    blit(dst, sub, sw, sh, x, y);
+  };
+
+  /** imgpath -> SkinRsc key, for both the stage and its inner panes. */
+  const pathKey = (el: { imgPath?: string[] }): keyof typeof SKIN | undefined => {
+    const file = el.imgPath?.at(-1)?.toLowerCase() ?? '';
+    return (Object.entries(SKIN).find(([, v]) => v.split('\\').at(-1)!.toLowerCase() === file)?.[0] as
+      | keyof typeof SKIN
+      | undefined);
+  };
+
+  // The inner pane is what the login form lives on: Inner_1P at 197,395 hosts
+  // the Login_1P pane (407x156 LoginTable00.bmp, edits, 1P/2P and the
+  // multiserver selector).  Inner_2P is hidden while 1P is selected.
+  const inner = stage.elements.find((e) => e.id === 'Inner_1P');
+  const form = panes[PANE.Login1P];
+  if (inner && form) {
+    for (const el of form.elements) {
+      if (!el.visible) continue;
+      if (el.kind === 'img' || el.kind === 'button') {
+        const key = pathKey(el);
+        const layer = key ? layers.get(key) : undefined;
+        if (layer) {
+          blitFrame(layer, el.kind === 'img' ? 0 : 1, inner.x + el.x, inner.y + el.y);
+          const r = layer.sheet.rects[el.kind === 'img' ? 0 : 1]!;
+          console.log(`inner ${el.id} ${r.x1 - r.x0}x${r.y1 - r.y0} at ${inner.x + el.x},${inner.y + el.y}`);
+        }
+      }
+      if (el.kind === 'sel') {
+        const selPane = panes.find((p) => p.elements.some((e) => e.id === 'Button_Dream') && p === panes[PANE.Login1PMultiserver]);
+        void selPane;
+        const mp = panes[PANE.Login1PMultiserver];
+        if (!mp) continue;
+        for (const se of mp.elements) {
+          if (!se.visible || se.kind !== 'button') continue;
+          const key = pathKey(se);
+          const layer = key ? layers.get(key) : undefined;
+          if (!layer) continue;
+          // checkbox=1 buttons on the server pane: frame 1 is the checked art.
+          blitFrame(layer, se.id === 'Button_Dream' ? 1 : 0, inner.x + el.x + se.x, inner.y + el.y + se.y);
+          console.log(`  server ${se.id} at ${inner.x + el.x + se.x},${inner.y + el.y + se.y}`);
+        }
+      }
+    }
+    console.log(`inner pane Inner_1P at ${inner.x},${inner.y} (${form.elements.length} elements)`);
+  }
+
+  const buttonKey: Record<string, string> = {
     'btloginnewid.bmp': 'btLoginNewId',
     'btloginok.bmp': 'btLoginOk',
     'btlogincancel.bmp': 'btLoginCancel',
@@ -101,19 +160,40 @@ async function main(): Promise<void> {
     if (!el.visible || el.kind !== 'button') continue;
     const file = el.imgPath?.at(-1)?.toLowerCase() ?? '';
     const key = buttonKey[file];
-    const layer = key ? layers.get(key) : undefined;
+    const layer = key ? layers.get(key as keyof typeof SKIN) : undefined;
     if (!layer) continue;
     const r = layer.sheet.rects[0]!;
-    const sw = r.x1 - r.x0;
-    const sh = r.y1 - r.y0;
-    // copy the sub-rect out of the sheet into a temp buffer, then blit it 1:1
-    const sub = new Uint8ClampedArray(sw * sh * 4);
-    for (let y = 0; y < sh; y++) {
-      const so = ((r.y0 + y) * layer.sheet.sheetW + r.x0) * 4;
-      sub.set(layer.rgba.subarray(so, so + sw * 4), y * sw * 4);
+    blitFrame(layer, 0, el.x, el.y);
+    console.log(`button ${el.id} ${r.x1 - r.x0}x${r.y1 - r.y0} at ${el.x},${el.y}`);
+  }
+
+  // Optional: outline the edit wells so their alignment with the pane art can
+  // be checked by eye (`--edits`).  The browser paints text into these rects.
+  if (process.argv.includes('--edits') && inner) {
+    const rect = (x: number, y: number, w: number, h: number, colour: [number, number, number]) => {
+      for (let i = 0; i < w; i++) {
+        for (const yy of [y, y + h - 1]) {
+          const o = ((yy * W) + x + i) * 4;
+          dst[o] = colour[0];
+          dst[o + 1] = colour[1];
+          dst[o + 2] = colour[2];
+          dst[o + 3] = 255;
+        }
+      }
+      for (let i = 0; i < h; i++) {
+        for (const xx of [x, x + w - 1]) {
+          const o = ((y + i) * W + xx) * 4;
+          dst[o] = colour[0];
+          dst[o + 1] = colour[1];
+          dst[o + 2] = colour[2];
+          dst[o + 3] = 255;
+        }
+      }
+    };
+    for (const [id, well] of Object.entries(EDIT_WELLS[1] ?? {})) {
+      rect(inner.x + well.x, inner.y + well.y, well.w, well.h, [255, 0, 0]);
+      console.log(`well ${id} ${well.w}x${well.h} at ${inner.x + well.x},${inner.y + well.y}`);
     }
-    blit(dst, sub, sw, sh, el.x, el.y);
-    console.log(`button ${el.id} ${sw}x${sh} at ${el.x},${el.y}`);
   }
 
   await Bun.write(out, encodePNG(W, H, new Uint8Array(dst.buffer)));
