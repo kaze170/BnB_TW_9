@@ -37,7 +37,14 @@ export interface MapInfo {
   description: string;
   /** Map family, e.g. `Bula`.  `Random` entries pick within their family. */
   family: string;
-  /** Art family used for the thumbnail, e.g. `Bula`. */
+  /**
+   * Art family, e.g. `Bula`.
+   *
+   * NOTE: this is *not* a sprite name.  `Map/<name>` in Fx is the map's
+   * attribute block (its tail carries strings such as "InnerSoul"), not an
+   * image, and there is no thumbnail sheet anywhere in Cx or Fx.  The lobby
+   * therefore shows the map *name* only and does not invent art for it.
+   */
   art: string;
   /** Packed colour as stored (0xRRGGBB). */
   colour: number;
