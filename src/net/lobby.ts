@@ -101,15 +101,24 @@ export class Lobby {
   join(ws: unknown): void {
     const peer = new PeerSocket((bytes) => this.rawSend(ws, bytes));
     peer.onPacket = (op, body) => this.handler?.(peer, op, body);
-    // The server picks the nonce; the client's key is (nonce + 231) ^ 142.
+    // The server picks the key byte the client must echo back (CClientSocket's
+    // sub_5805F0 produces (nonce + 192) ^ 142 for a socket whose random is
+    // `nonce`); the shared cipher key is that same byte on both ends.
     const nonce = (Math.random() * 256) & 0xff;
-    peer.cipher.key = nonce;
+    const keyByte = socketReadKey(nonce);
     this.peers.set(ws, peer);
-    this.rawSend(ws, encodeFrame(1, new Uint8Array([socketSendKey(nonce)]), {
-      key: nonce,
+    // Hello goes out in the clear; everything after it is obfuscated with the
+    // negotiated key (CClientSocket turns the obfuscation on when the key is
+    // accepted, not when it sends the hello).
+    peer.cipher.key = keyByte;
+    peer.cipher.cryptKey = false;
+    this.rawSend(ws, encodeFrame(1, new Uint8Array([keyByte]), {
+      key: keyByte,
       mode: CIPHER_NONE,
       cryptKey: false,
     }));
+    peer.cipher.cryptKey = true;
+    peer.keyConfirmed = true;
     void PacketReader;
     void PacketWriter;
   }

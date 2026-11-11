@@ -200,9 +200,9 @@ export interface SocketCipher {
  *
  * `body` excludes the opcode.
  */
-export function encodeFrame(opcode: number, body: Uint8Array, sock: SocketCipher): Uint8Array {
+export function encodeFrame(opcode: number, body: Uint8Array, sock: SocketCipher): Uint8Array<ArrayBuffer> {
   const bodyLen = 1 + body.length;
-  const out = new Uint8Array(3 + bodyLen);
+  const out = new Uint8Array(new ArrayBuffer(3 + bodyLen));
   out[0] = (opcode ^ ((sock.key + 40) & 0xff)) & 0xff;
   out[1] = ((bodyLen ^ 0xa569) >>> 8) & 0xff;
   out[2] = (bodyLen ^ 0xa569) & 0xff;

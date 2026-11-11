@@ -10,6 +10,7 @@
 import { GameAssets } from './data/assets.ts';
 import { SpriteRenderer, requestDevice } from './gfx/renderer.ts';
 import { LoginStage, SCREEN_H, SCREEN_W } from './stage/login.ts';
+import { GameSocket, OP } from './net/client.ts';
 
 const logEl = document.getElementById('log');
 function log(msg: string): void {
@@ -43,6 +44,31 @@ async function main(): Promise<void> {
   const stage = new LoginStage(assets, renderer);
   await stage.load((m) => log(m));
   log('login stage ready');
+
+  const socket = new GameSocket({
+    open: () => log('socket connected'),
+    close: (code) => log(`socket closed (${code})`),
+    error: () => log('socket error'),
+    packet: (op, body) => {
+      if (op === OP.Confirm) {
+        log(`handshake: key 0x${(body[0] ?? 0).toString(16)}`);
+        return;
+      }
+      if (op === OP.LoginResult) {
+        const ok = body[0] === 1;
+        const msg = new TextDecoder('euc-kr').decode(body.subarray(3, 3 + ((body[1]! << 8) | body[2]!)));
+        log(`login ${ok ? 'ok' : 'failed'}: ${msg}`);
+        return;
+      }
+      log(`packet 0x${op.toString(16)} (${body.length}B)`);
+    },
+  });
+  const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+  socket.connect(wsUrl).catch(() => log('server not reachable'));
+  stage.setLoginHandler((id, pass) => {
+    log(`login ${id}`);
+    socket.login(id, pass);
+  });
 
   const toLogical = (ev: PointerEvent | MouseEvent): { x: number; y: number } => {
     const r = canvas.getBoundingClientRect();

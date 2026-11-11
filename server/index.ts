@@ -101,8 +101,10 @@ const server = Bun.serve({
   },
 });
 
-// --- minimal lobby (see src/net/protocol.ts for the wire format) -------------
+// --- lobby (wire format: src/net/protocol.ts; behaviour: server/gateway.ts) --
 import { Lobby } from '../src/net/lobby.ts';
+import { attachGateway } from './gateway.ts';
 const lobby = new Lobby();
+attachGateway(lobby);
 
 console.log(`dev server on http://0.0.0.0:${server.port}  (public=${existsSync(PUBLIC) ? 'ok' : 'missing'})`);
