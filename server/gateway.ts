@@ -160,7 +160,20 @@ function str(w: PacketWriter, text: string): void {
   w.str(encoder.encode(text));
 }
 
+/** Release exactly the room occupied by this peer, if any. */
+function releaseRoom(peer: PeerSocket): void {
+  const slot = peerRoom.get(peer);
+  if (slot === undefined) return;
+  peerRoom.delete(peer);
+  const room = ROOMS[slot];
+  if (room) room.players = Math.max(0, room.players - 1);
+}
+
 export function attachGateway(lobby: Lobby): void {
+  lobby.onLeave = (peer) => {
+    releaseRoom(peer);
+    peerChannel.delete(peer);
+  };
   lobby.handler = (peer: PeerSocket, op: number, body: Uint8Array) => {
     switch (op) {
       case OP.Login: {
@@ -185,6 +198,7 @@ export function attachGateway(lobby: Lobby): void {
           sendJoinResult(peer, false, 0xffff, 'no such channel');
           return;
         }
+        releaseRoom(peer);
         peerChannel.set(peer, idx);
         sendJoinResult(peer, true, idx, '');
         sendRooms(peer);
@@ -199,10 +213,19 @@ export function attachGateway(lobby: Lobby): void {
           sendEnterResult(peer, false, slot, 'NotValidRoomInfo');
           return;
         }
+        // Repeated entry requests from one peer must not consume more seats.
+        if (peerRoom.get(peer) === slot) {
+          sendEnterResult(peer, true, slot, '');
+          sendRooms(peer);
+          return;
+        }
         if (room.players >= room.capacity) {
           sendEnterResult(peer, false, slot, 'NoEmptySlot');
           return;
         }
+        // Keep the old seat if the requested destination was invalid or full;
+        // otherwise switching rooms frees it before occupying the new one.
+        releaseRoom(peer);
         peerRoom.set(peer, slot);
         room.players = Math.min(room.capacity, room.players + 1);
         sendEnterResult(peer, true, slot, '');
@@ -210,12 +233,7 @@ export function attachGateway(lobby: Lobby): void {
         return;
       }
       case OP.LeaveRoom: {
-        const slot = peerRoom.get(peer);
-        if (slot !== undefined) {
-          const room = ROOMS[slot];
-          if (room) room.players = Math.max(0, room.players - 1);
-          peerRoom.delete(peer);
-        }
+        releaseRoom(peer);
         sendRooms(peer);
         return;
       }

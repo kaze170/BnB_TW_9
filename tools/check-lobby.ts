@@ -86,6 +86,7 @@ const result: Result = {
 
 await new Promise<void>((resolve) => {
   let settled = false;
+  let attemptedEntry = false;
   const finish = (): void => {
     if (settled) return;
     settled = true;
@@ -123,9 +124,12 @@ await new Promise<void>((resolve) => {
       }
       if (op === OP.RoomList) {
         result.rooms = decodeRoomList(body);
-        const free = result.rooms.find((r) => r.players < r.capacity);
-        if (free) sock.enterRoom(free.slot);
-        else sock.close();
+        if (!attemptedEntry) {
+          attemptedEntry = true;
+          const free = result.rooms.find((r) => r.players < r.capacity);
+          if (free) sock.enterRoom(free.slot);
+          else sock.close();
+        }
         return;
       }
       if (op === OP.EnterResult) {

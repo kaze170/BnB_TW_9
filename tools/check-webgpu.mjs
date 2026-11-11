@@ -9,6 +9,14 @@ import { chromium } from 'playwright-core';
 import { PNG } from 'pngjs';
 
 const url = process.env.BNB_URL ?? 'http://127.0.0.1:3000';
+function canvasChanged(a, b) {
+  let changed = 0;
+  for (let i = 0; i < a.data.length; i += 4) {
+    if (Math.abs(a.data[i] - b.data[i]) + Math.abs(a.data[i + 1] - b.data[i + 1]) + Math.abs(a.data[i + 2] - b.data[i + 2]) > 30) changed++;
+  }
+  return changed >= 10000;
+}
+
 execFileSync('bun', ['build', 'src/main.ts', 'src/gfx/renderer.ts', '--outdir', 'public/build', '--target', 'browser'], { stdio: 'inherit' });
 const flags = ['--enable-unsafe-webgpu'];
 if (process.env.WEBGPU_SWIFTSHADER === '1') {
@@ -119,6 +127,27 @@ try {
   }
   if (changed < 10000) throw new Error(`Server selection did not visibly render (${changed} pixels changed)`);
   console.log('ok: login interaction visibly reaches server selection without browser or WebGPU errors');
+
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('#log')?.textContent?.includes('channel stage ready'), null, { timeout: 30000 });
+  await page.waitForTimeout(500);
+  const channelPixels = PNG.sync.read(await screen.screenshot());
+  if (!canvasChanged(serverPixels, channelPixels)) throw new Error('Channel stage did not visibly render');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('#log')?.textContent?.includes('lobby stage ready'), null, { timeout: 60000 });
+  await page.waitForTimeout(500);
+  const lobbyPixels = PNG.sync.read(await screen.screenshot());
+  if (!canvasChanged(channelPixels, lobbyPixels)) throw new Error('Lobby stage did not visibly render');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('#log')?.textContent?.includes('enter room 1: ok'), null, { timeout: 30000 });
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(800);
+  const returnedPixels = PNG.sync.read(await screen.screenshot());
+  if (!canvasChanged(lobbyPixels, returnedPixels)) throw new Error('Escape did not return from lobby to channel stage');
+  const finalLog = await page.locator('#log').innerText();
+  if (/WebGPU error|WebGPU device lost|Render error/i.test(finalLog) || errors.length) throw new Error(`Browser errors: ${errors.join('; ')}\n${finalLog}`);
+  console.log('ok: server → channel → lobby → room entry → channel');
   await page.close();
 } finally {
   await browser.close();

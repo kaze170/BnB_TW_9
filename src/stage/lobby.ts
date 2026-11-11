@@ -168,7 +168,7 @@ export class LobbyStage {
     this.slotFrames = frames;
   }
 
-  /** Six slots, in the retail order (row-major through the 2x3 grid). */
+  /** Six slots in the executable table order (top to bottom in each column). */
   setSlots(slots: (RoomSlot | null)[]): void {
     this.slots = slots.slice(0, SLOTS.length);
     while (this.slots.length < SLOTS.length) this.slots.push(null);
@@ -336,7 +336,6 @@ export class LobbyStage {
   }
 
   handleKey(ev: KeyboardEvent): void {
-    const cols = 2;
     if (ev.key === 'Backspace') {
       this.input = this.input.slice(0, -1);
       ev.preventDefault();
@@ -347,16 +346,18 @@ export class LobbyStage {
       ev.preventDefault();
       return;
     }
+    // SLOT_ORIGINS is column-major: 0,1,2 at the left, 3,4,5 at the right.
+    // Follow the table geometrically rather than treating it as row-major.
     if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
-      const d = ev.key === 'ArrowRight' ? 1 : -1;
-      this.selected = Math.min(Math.max(this.selected + d, 0), SLOTS.length - 1);
+      const next = this.selected + (ev.key === 'ArrowRight' ? 3 : -3);
+      if (next >= 0 && next < SLOTS.length) this.selected = next;
       ev.preventDefault();
       return;
     }
     if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
-      const d = (ev.key === 'ArrowDown' ? 1 : -1) * cols;
-      const next = this.selected + d;
-      if (next >= 0 && next < SLOTS.length) this.selected = next;
+      const row = this.selected % 3;
+      if (ev.key === 'ArrowDown' && row < 2) this.selected++;
+      if (ev.key === 'ArrowUp' && row > 0) this.selected--;
       ev.preventDefault();
       return;
     }

@@ -126,10 +126,11 @@ async function main(): Promise<void> {
   };
 
   const showChannels = async (): Promise<void> => {
-    if (channelsReady) return;
-    const art = await assets.image('Cx', 'StageChannel/CAStage');
-    if (art) channel.setBackground(art);
-    channelsReady = true;
+    if (!channelsReady) {
+      const art = await assets.image('Cx', 'StageChannel/CAStage');
+      if (art) channel.setBackground(art);
+      channelsReady = true;
+    }
     stage = 'channel';
     log('channel stage ready');
   };
@@ -164,10 +165,6 @@ async function main(): Promise<void> {
           if (action === 'channel') {
             socket.leaveRoom();
             void showChannels();
-            return;
-          }
-          if (action === 'quickjoin' && slot) {
-            socket.enterRoom(slot.id);
             return;
           }
           log(`lobby action ${action}${slot ? ` on ${slot.name}` : ''}`);

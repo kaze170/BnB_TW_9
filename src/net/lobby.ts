@@ -97,6 +97,7 @@ export class PeerSocket implements Peer {
 export class Lobby {
   private readonly peers = new Map<unknown, PeerSocket>();
   handler: ((peer: PeerSocket, op: number, body: Uint8Array) => void) | null = null;
+  onLeave: ((peer: PeerSocket) => void) | null = null;
 
   join(ws: unknown): void {
     const peer = new PeerSocket((bytes) => this.rawSend(ws, bytes));
@@ -131,7 +132,10 @@ export class Lobby {
   }
 
   leave(ws: unknown): void {
+    const peer = this.peers.get(ws);
+    if (!peer) return;
     this.peers.delete(ws);
+    this.onLeave?.(peer);
   }
 
   broadcast(op: number, body: Uint8Array = EMPTY): void {
