@@ -15,6 +15,12 @@
  */
 
 import { GameSocket, OP, decodeChannelList, decodeRoomList } from '../src/net/client.ts';
+import { readSsi, decodeSystemStrings } from '../src/data/ssi.ts';
+
+function str16At(bytes: Uint8Array, off: number): string {
+  const n = (bytes[off]! << 8) | bytes[off + 1]!;
+  return new TextDecoder('latin1').decode(bytes.subarray(off + 2, off + 2 + n));
+}
 import { readChannelFile } from '../src/data/channel.ts';
 import { readServerList, mergeWithBuiltins } from '../src/data/serverlist.ts';
 
@@ -60,6 +66,7 @@ interface Result {
   rooms: ReturnType<typeof decodeRoomList>;
   enterOk: boolean;
   enterSlot: number;
+  enterKey: string;
   closed: boolean;
 }
 
@@ -72,6 +79,7 @@ const result: Result = {
   rooms: [],
   enterOk: false,
   enterSlot: -1,
+  enterKey: '',
   closed: false,
 };
 
@@ -120,8 +128,17 @@ await new Promise<void>((resolve) => {
         return;
       }
       if (op === OP.EnterResult) {
-        result.enterOk = body[0] === 1;
-        result.enterSlot = (body[1]! << 8) | body[2]!;
+        const okNow = body[0] === 1;
+        const slotNow = (body[1]! << 8) | body[2]!;
+        if (okNow) {
+          result.enterOk = true;
+          result.enterSlot = slotNow;
+          // Ask for a slot that cannot exist: the client must be handed a
+          // csysstr.ssd key, not a server sentence.
+          sock.enterRoom(99);
+          return;
+        }
+        result.enterKey = str16At(body, 3);
         sock.leaveRoom();
         sock.close();
         return;
@@ -156,6 +173,27 @@ check(
   result.rooms.every((r) => r.players <= r.capacity && r.capacity > 0 && r.name !== ''),
 );
 check('entering a room was accepted', result.enterOk, `slot ${result.enterSlot}`);
+
+const sysRows = decodeSystemStrings(
+  readSsi(new Uint8Array(await Bun.file(new URL('../csysstr.ssd', import.meta.url)).arrayBuffer()))!.payload,
+)!;
+const enterMsg = sysRows.find((r) => r.name === result.enterKey);
+check(
+  'a bad room slot is reported with a csysstr.ssd key',
+  result.enterKey === 'NotValidRoomInfo',
+  `got ${JSON.stringify(result.enterKey)}`,
+);
+check(
+  'that key resolves in the client string table',
+  enterMsg?.text === '無效的房間，無法確認房間資料',
+  enterMsg?.text,
+);
+check(
+  'the room failure keys the retail lobby uses all resolve',
+  ['NoEmptySlot', 'CantCreateRoom', 'NoAuthority', 'SameRoomExist', 'InvalidGradeCreate'].every((k) =>
+    sysRows.some((r) => r.name === k),
+  ),
+);
 
 console.log(failures === 0 ? '\nlobby checks passed' : `\n${failures} check(s) failed`);
 if (failures > 0) process.exit(1);

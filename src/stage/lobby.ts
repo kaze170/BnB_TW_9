@@ -60,10 +60,14 @@ export const SLOT_FRAME = { idle: 0, pressed: 1, hover: 2, selected: 3 } as cons
  * table (dword_6158B0, sixteen pairs, x=643, y=111+23k) — the same array the
  * lobby's draw loop walks with `cmp ..., 10h`.
  *
- * Inside one row the draw loop uses these offsets off the row origin:
- *   x+0x27, y+2   the name
- *   x+0x14, y+1   the level / icon
- * so `name`/`level` below are those offsets, not guesses.
+ * Inside one row `sub_46A42E` places two things, both with offsets taken from
+ * the code rather than measured off the art:
+ *
+ *   x+0x27, y+2   the player name, drawn as text (sub_56ADD0)
+ *   x+0x14, y+1   the player's level, drawn as *numerals* by sub_4F6FF1 —
+ *                 that routine clamps its value to 1..450 and indexes a
+ *                 24-byte-stride glyph table at 0x625C00, so it is a number
+ *                 renderer, not a text one.
  */
 export const PLAYER_ORIGINS: readonly (readonly [number, number])[] = Array.from(
   { length: 16 },
@@ -72,6 +76,9 @@ export const PLAYER_ORIGINS: readonly (readonly [number, number])[] = Array.from
 
 export const PLAYERS = { x: 643, y: 111, w: 132, rowH: 23, rows: 16 } as const;
 export const PLAYER_FIELDS = { level: { dx: 0x14, dy: 1 }, name: { dx: 0x27, dy: 2 } } as const;
+
+/** sub_4F6FF1 clamps the value it draws to this range. */
+export const LEVEL_RANGE = { min: 1, max: 450 } as const;
 /** Chat panel. */
 export const CHAT = { x: 24, y: 400, w: 559, h: 120 } as const;
 /**
@@ -262,7 +269,8 @@ export class LobbyStage {
         size: 12,
         colour: '#ffffff',
       });
-      drawText(ctx, String(p.level), rx + PLAYER_FIELDS.level.dx, ry + PLAYER_FIELDS.level.dy, {
+      const level = Math.min(LEVEL_RANGE.max, Math.max(LEVEL_RANGE.min, p.level));
+      drawText(ctx, String(level), rx + PLAYER_FIELDS.level.dx, ry + PLAYER_FIELDS.level.dy, {
         size: 11,
         colour: '#bfe0ff',
       });

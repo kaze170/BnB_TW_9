@@ -26,6 +26,21 @@ function log(msg: string): void {
 
 type Stage = 'login' | 'server' | 'channel' | 'lobby';
 
+/**
+ * The `str16` at `off` (u16 length, then bytes), as latin1.
+ *
+ * The gateway puts csysstr.ssd *keys* on the wire, and those keys are ASCII by
+ * construction (`SameRoomExist`, `NoEmptySlot`, …), so latin1 round-trips them
+ * exactly and no Big5 encoder is needed.
+ */
+function str16At(bytes: Uint8Array, off: number): string {
+  if (off + 2 > bytes.length) return '';
+  const n = (bytes[off]! << 8) | bytes[off + 1]!;
+  const s = off + 2;
+  if (s + n > bytes.length) return '';
+  return new TextDecoder('latin1').decode(bytes.subarray(s, s + n));
+}
+
 async function main(): Promise<void> {
   const canvas = document.getElementById('screen') as HTMLCanvasElement | null;
   if (!canvas) throw new Error('#screen missing');
@@ -58,6 +73,7 @@ async function main(): Promise<void> {
   const lobby = new LobbyStage(renderer);
   let stage: Stage = 'login';
   let lobbyReady = false;
+  const lobbyChat: string[] = [];
   let channelsReady = false;
   let serverReady = false;
   let realms: RealmRow[] = [];
@@ -199,7 +215,17 @@ async function main(): Promise<void> {
       if (op === OP.EnterResult) {
         const ok = body[0] === 1;
         const slot = (body[1]! << 8) | body[2]!;
-        log(`enter room ${slot}: ${ok ? 'ok' : 'failed'}`);
+        // The message is a csysstr.ssd key; resolve it against the client's own
+        // string table instead of showing a server-authored sentence.
+        const key = str16At(body, 3);
+        void assets.systemString(key || '-').then((text) => {
+          const shown = text ?? key;
+          log(`enter room ${slot}: ${ok ? 'ok' : `failed (${shown})`}`);
+          if (!ok) {
+            lobbyChat.push(`[系統] ${shown}`);
+            lobby.setChat(lobbyChat.slice(-6));
+          }
+        });
         return;
       }
       log(`packet 0x${op.toString(16)} (${body.length}B)`);

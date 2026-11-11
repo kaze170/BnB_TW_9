@@ -142,6 +142,24 @@ export class GameAssets {
     return find(`ChannelExplain${position}`) ?? find(`ChannelDesc${kind}`);
   }
 
+  /**
+   * One `csysstr.ssd` row by its key.
+   *
+   * These are the client's own error/label strings.  The lobby failure keys the
+   * retail code reports (0x46AB69, 0x46AC9C, 0x46AD34, 0x46ADC7, 0x46AE5A,
+   * 0x46AEED) all resolve here:
+   *   NotValidRoomInfo    無效的房間，無法確認房間資料
+   *   InvalidGradeCreate  因您身上的LUCCI不足 因此無法開啟房間參加遊戲
+   *   NoAuthority         沒有開設房間的權限
+   *   CantCreateRoom      無法建立房間，請稍後再試
+   *   NoEmptySlot         房間不足，無法建立遊戲房間，請稍後再試
+   *   SameRoomExist       已存在的房間名稱，請使用其他名稱
+   */
+  async systemString(name: string): Promise<string | null> {
+    const { systemStrings } = await this.config();
+    return systemStrings.find((r) => r.name === name)?.text ?? null;
+  }
+
   /** Decoded string tables and the raw config payloads. */
   config(): Promise<{
     stringTable: StringRow[];

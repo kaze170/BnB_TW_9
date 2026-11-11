@@ -26,6 +26,10 @@
  * Room record:
  *   u16 slot, str16 name, u16 players, u16 capacity, u8 state, str16 map
  *
+ * EnterResult and JoinResult carry a *key* into the client's csysstr.ssd, not
+ * a human sentence: the retail client looks the message up itself, and those
+ * keys are the ones the lobby's own failure paths reference.
+ *
  * Channel record on the wire (ours, but it carries every field of the file
  * record so the UI needs nothing else):
  *   str16 name (the Big5 bytes from channel2_000.ssd, verbatim),
@@ -188,11 +192,12 @@ export function attachGateway(lobby: Lobby): void {
         const slot = r.u16();
         const room = ROOMS[slot];
         if (!room) {
-          sendEnterResult(peer, false, slot, 'no such room');
+          // csysstr.ssd key, resolved by the client's own string table.
+          sendEnterResult(peer, false, slot, 'NotValidRoomInfo');
           return;
         }
         if (room.players >= room.capacity) {
-          sendEnterResult(peer, false, slot, 'room full');
+          sendEnterResult(peer, false, slot, 'NoEmptySlot');
           return;
         }
         peerRoom.set(peer, slot);
