@@ -99,12 +99,16 @@ export class SpriteRenderer {
   private instanceData: Float32Array;
   private instanceBuffer: GPUBuffer;
   private instanceCount = 0;
+  /** where the next batch starts inside the instance buffer */
+  private instanceCursor = 0;
   private currentTexture: GPUTexture | null = null;
   private readonly canvas: HTMLCanvasElement;
   /** logical resolution (the client runs at a fixed 800x600-ish root) */
   width: number;
   height: number;
   private dpr: number;
+  private pendingEncoder: GPUCommandEncoder | null = null;
+  private pendingPass: GPURenderPassEncoder | null = null;
   readonly stats: RendererStats = { quads: 0, batchFlushes: 0 };
 
   constructor(device: GPUDevice, canvas: HTMLCanvasElement, width: number, height: number) {
@@ -220,9 +224,27 @@ export class SpriteRenderer {
 
   begin() {
     this.instanceCount = 0;
+    this.instanceCursor = 0;
     this.currentTexture = null;
     this.stats.quads = 0;
     this.stats.batchFlushes = 0;
+    // Open the pass here, not on the first flush: a frame that draws nothing
+    // still has to clear the swapchain, otherwise the previous frame stays.
+    this.pendingEncoder = this.device.createCommandEncoder();
+    const view = this.context.getCurrentTexture().createView();
+    this.pendingPass = this.pendingEncoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view,
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          loadOp: 'clear',
+          storeOp: 'store',
+        },
+      ],
+    });
+    this.pendingPass.setPipeline(this.pipeline);
+    this.pendingPass.setBindGroup(0, this.bindGroup);
+    this.pendingPass.setVertexBuffer(0, this.instanceBuffer);
   }
 
   draw(q: DrawQuad) {
@@ -231,6 +253,12 @@ export class SpriteRenderer {
       this.currentTexture = q.texture;
     }
     if ((this.instanceCount + 1) * 13 > this.instanceData.length) this.flush();
+    if ((this.instanceCursor + this.instanceCount + 1) * 52 > this.instanceBuffer.size) {
+      // Out of ring space: stop the pass and open a fresh one next frame.
+      this.flush();
+      this.end();
+      this.begin();
+    }
     const t = q.tint ?? [1, 1, 1, 1];
     const o = this.instanceCount * 13;
     const d = this.instanceData;
@@ -251,8 +279,6 @@ export class SpriteRenderer {
     this.stats.quads++;
   }
 
-  private pendingEncoder: GPUCommandEncoder | null = null;
-  private pendingPass: GPURenderPassEncoder | null = null;
   private overlay: (() => void) | null = null;
 
   /** Queue a callback that runs after the sprite pass (text, HUD, …). */
@@ -261,34 +287,23 @@ export class SpriteRenderer {
   }
 
   flush() {
-    if (!this.currentTexture || this.instanceCount === 0) return;
-    if (!this.pendingEncoder) {
-      this.pendingEncoder = this.device.createCommandEncoder();
-      const view = this.context.getCurrentTexture().createView();
-      this.pendingPass = this.pendingEncoder.beginRenderPass({
-        colorAttachments: [
-          {
-            view,
-            clearValue: { r: 0, g: 0, b: 0, a: 0 },
-            loadOp: 'clear',
-            storeOp: 'store',
-          },
-        ],
-      });
-      this.pendingPass.setPipeline(this.pipeline);
-      this.pendingPass.setBindGroup(0, this.bindGroup);
-      this.pendingPass.setVertexBuffer(0, this.instanceBuffer);
-    }
+    if (!this.pendingPass || this.instanceCount === 0) return;
+    // Each batch keeps its own slice of the instance buffer: a render pass
+    // reads vertex buffers when it executes, so overwriting the same slice
+    // between draws would make earlier batches read the later data.
+    const first = this.instanceCursor;
+    const bytes = this.instanceCount * 13 * 4;
     this.device.queue.writeBuffer(
       this.instanceBuffer,
-      0,
+      first * 52,
       this.instanceData.buffer,
       0,
-      this.instanceCount * 13 * 4,
+      bytes,
     );
-    this.pendingPass!.setVertexBuffer(0, this.instanceBuffer, 0, this.instanceCount * 52);
-    this.pendingPass!.draw(6, this.instanceCount);
+    this.pendingPass.setVertexBuffer(0, this.instanceBuffer, first * 52, this.instanceCount * 52);
+    this.pendingPass.draw(6, this.instanceCount);
     this.stats.batchFlushes++;
+    this.instanceCursor += this.instanceCount;
     this.instanceCount = 0;
     this.currentTexture = null;
   }
@@ -304,6 +319,8 @@ export class SpriteRenderer {
       this.device.queue.submit([this.pendingEncoder.finish()]);
       this.pendingEncoder = null;
     }
+    this.instanceCursor = 0;
+    this.currentTexture = null;
   }
 }
 

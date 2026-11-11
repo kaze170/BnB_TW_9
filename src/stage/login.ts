@@ -387,7 +387,10 @@ export class LoginStage {
     const b = this.hit(x, y);
     if (!b) return;
     if (b.kind === 'player') {
-      this.selectPlayer(b.player ?? 1);
+      // The button belongs to the pane it is drawn in, but its *id* names the
+      // pane it selects: Inner_1P carries Button_1P and Button_2P, and clicking
+      // Button_2P has to move to the 2P pane.
+      this.selectPlayer(b.id === 'Button_2P' ? 2 : 1);
       return;
     }
     if (b.kind === 'server') {
