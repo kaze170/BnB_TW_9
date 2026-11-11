@@ -13,7 +13,10 @@ import { GameAssets } from './data/assets.ts';
 import { SpriteRenderer, requestDevice } from './gfx/renderer.ts';
 import { LoginStage, SCREEN_H, SCREEN_W } from './stage/login.ts';
 import { ChannelStage } from './stage/channel.ts';
-import { GameSocket, OP, decodeChannelList } from './net/client.ts';
+import { SelectServerStage, type RealmRow } from './stage/selectserver.ts';
+import { LobbyStage, type LobbyAction, type RoomSlot } from './stage/lobby.ts';
+import { readServerList, mergeWithBuiltins } from './data/serverlist.ts';
+import { GameSocket, OP, decodeChannelList, decodeRoomList } from './net/client.ts';
 
 const logEl = document.getElementById('log');
 function log(msg: string): void {
@@ -21,7 +24,7 @@ function log(msg: string): void {
   logEl.textContent = `${msg}\n${logEl.textContent ?? ''}`.slice(0, 4000);
 }
 
-type Stage = 'login' | 'channel';
+type Stage = 'login' | 'server' | 'channel' | 'lobby';
 
 async function main(): Promise<void> {
   const canvas = document.getElementById('screen') as HTMLCanvasElement | null;
@@ -51,8 +54,49 @@ async function main(): Promise<void> {
   log('login stage ready');
 
   const channel = new ChannelStage(renderer);
+  const server = new SelectServerStage(renderer);
+  const lobby = new LobbyStage(renderer);
   let stage: Stage = 'login';
+  let lobbyReady = false;
   let channelsReady = false;
+  let serverReady = false;
+  let realms: RealmRow[] = [];
+
+  /** The retail realm list: multisvr.ssd plus the addresses in the EXE. */
+  const loadRealms = async (): Promise<RealmRow[]> => {
+    try {
+      const res = await fetch('/game/multisvr.ssd');
+      if (!res.ok) throw new Error(String(res.status));
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      const eps = mergeWithBuiltins(readServerList(bytes));
+      return eps.map((e) => ({ address: e.address, port: e.port, label: e.address }));
+    } catch {
+      return [];
+    }
+  };
+
+  const showServers = async (): Promise<void> => {
+    if (!serverReady) {
+      const art = await assets.image('Cx', 'MultiServer/CAStage');
+      if (art) server.setBackground(art);
+      realms = await loadRealms();
+      server.setRows(realms, 0);
+      server.setHandlers(
+        (row) => {
+          log(`realm ${row.address}:${row.port}`);
+          // Picking a realm moves on to the channel list, the way
+          // CSelectServerStage hands the connection to CStageChannel.
+          void showChannels();
+        },
+        () => {
+          stage = 'login';
+        },
+      );
+      serverReady = true;
+    }
+    stage = 'server';
+    log(`server stage ready (${realms.length} realms)`);
+  };
 
   const showChannels = async (): Promise<void> => {
     if (channelsReady) return;
@@ -61,6 +105,49 @@ async function main(): Promise<void> {
     channelsReady = true;
     stage = 'channel';
     log('channel stage ready');
+  };
+
+  const showLobby = async (): Promise<void> => {
+    if (!lobbyReady) {
+      const art = await assets.image('Fx', 'Channel/CAStage');
+      if (art) lobby.setBackground(art);
+      const slotSheet = await assets.sheet('Fx', 'Channel/BtSessionSlot');
+      const slotTex = await assets.texture('Fx', 'Channel/BtSessionSlot');
+      if (slotSheet && slotTex) {
+        lobby.setSlotArt(
+          slotTex,
+          slotSheet.rects.map((r) => ({
+            sx: r.x0,
+            sy: r.y0,
+            sw: r.x1 - r.x0,
+            sh: r.y1 - r.y0,
+          })),
+        );
+      }
+      lobby.setHandlers(
+        (action: LobbyAction, slot: RoomSlot | null) => {
+          if (action === 'exit') {
+            socket.leaveRoom();
+            void showChannels();
+            return;
+          }
+          if (action === 'channel') {
+            socket.leaveRoom();
+            void showChannels();
+            return;
+          }
+          if (action === 'quickjoin' && slot) {
+            socket.enterRoom(slot.id);
+            return;
+          }
+          log(`lobby action ${action}${slot ? ` on ${slot.name}` : ''}`);
+        },
+        (slot: RoomSlot) => socket.enterRoom(slot.id),
+      );
+      lobbyReady = true;
+    }
+    stage = 'lobby';
+    log('lobby stage ready');
   };
 
   const socket = new GameSocket({
@@ -76,7 +163,7 @@ async function main(): Promise<void> {
         const ok = body[0] === 1;
         const msg = new TextDecoder('big5').decode(body.subarray(3, 3 + ((body[1]! << 8) | body[2]!)));
         log(`login ${ok ? 'ok' : 'failed'}${msg ? `: ${msg}` : ''}`);
-        if (ok) void showChannels();
+        if (ok) void showServers();
         return;
       }
       if (op === OP.ChannelList) {
@@ -93,6 +180,26 @@ async function main(): Promise<void> {
         const ok = body[0] === 1;
         const channelId = (body[1]! << 8) | body[2]!;
         log(`join ${ok ? 'ok' : 'failed'} (channel ${channelId})`);
+        if (ok) void showLobby();
+        return;
+      }
+      if (op === OP.RoomList) {
+        const rooms = decodeRoomList(body);
+        log(`rooms: ${rooms.map((r) => `${r.name} ${r.players}/${r.capacity}`).join(', ')}`);
+        lobby.setSlots(rooms.map((r) => ({
+          id: r.slot,
+          name: r.name,
+          players: r.players,
+          capacity: r.capacity,
+          state: r.state === 1 ? 'playing' : r.state === 2 ? 'locked' : 'waiting',
+          map: r.map,
+        })));
+        return;
+      }
+      if (op === OP.EnterResult) {
+        const ok = body[0] === 1;
+        const slot = (body[1]! << 8) | body[2]!;
+        log(`enter room ${slot}: ${ok ? 'ok' : 'failed'}`);
         return;
       }
       log(`packet 0x${op.toString(16)} (${body.length}B)`);
@@ -129,16 +236,22 @@ async function main(): Promise<void> {
   canvas.addEventListener('pointermove', (ev) => {
     const p = toLogical(ev);
     if (stage === 'login') login.handlePointerMove(p.x, p.y);
-    else channel.handlePointerMove(p.x, p.y);
+    else if (stage === 'server') server.handlePointerMove(p.x, p.y);
+    else if (stage === 'channel') channel.handlePointerMove(p.x, p.y);
+    else lobby.handlePointerMove(p.x, p.y);
   });
   canvas.addEventListener('pointerdown', (ev) => {
     const p = toLogical(ev);
     if (stage === 'login') login.handleClick(p.x, p.y);
-    else channel.handleClick(p.x, p.y);
+    else if (stage === 'server') server.handleClick(p.x, p.y);
+    else if (stage === 'channel') channel.handleClick(p.x, p.y);
+    else lobby.handleClick(p.x, p.y);
   });
   window.addEventListener('keydown', (ev) => {
     if (stage === 'login') login.handleKey(ev);
-    else channel.handleKey(ev);
+    else if (stage === 'server') server.handleKey(ev);
+    else if (stage === 'channel') channel.handleKey(ev);
+    else lobby.handleKey(ev);
   });
 
   const frame = (): void => {
@@ -146,9 +259,15 @@ async function main(): Promise<void> {
     if (stage === 'login') {
       login.render();
       login.renderOverlay(ctx);
-    } else {
+    } else if (stage === 'server') {
+      server.render();
+      server.renderOverlay(ctx);
+    } else if (stage === 'channel') {
       channel.render();
       channel.renderOverlay(ctx);
+    } else {
+      lobby.render();
+      lobby.renderOverlay(ctx);
     }
     requestAnimationFrame(frame);
   };

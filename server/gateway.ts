@@ -19,6 +19,12 @@
  *   0x12  S -> C  channel list,            u16 count, count * channel record
  *   0x13  C -> S  join channel,            u16 channel index
  *   0x14  S -> C  join result,             u8 ok, u16 channelId, str16(message)
+ *   0x15  S -> C  room list,               u16 count, count * room record
+ *   0x16  C -> S  enter room,              u16 slot
+ *   0x17  S -> C  enter result,            u8 ok, u16 slot, str16(message)
+ *
+ * Room record:
+ *   u16 slot, str16 name, u16 players, u16 capacity, u8 state, str16 map
  *
  * Channel record on the wire (ours, but it carries every field of the file
  * record so the UI needs nothing else):
@@ -41,7 +47,15 @@ export const OP = {
   ChannelList: 0x12,
   JoinChannel: 0x13,
   JoinResult: 0x14,
+  RoomList: 0x15,
+  EnterRoom: 0x16,
+  EnterResult: 0x17,
+  LeaveRoom: 0x18,
 } as const;
+
+export function roomCount(): number {
+  return ROOMS.length;
+}
 
 export interface Account {
   id: string;
@@ -53,6 +67,47 @@ const accounts = new Map<string, Account>();
 
 /** Which channel each peer ended up in, keyed by the peer object. */
 const peerChannel = new WeakMap<PeerSocket, number>();
+/** Which room slot each peer occupies. */
+const peerRoom = new WeakMap<PeerSocket, number>();
+
+/**
+ * Room slots.  The retail client lays out six of them (CLobbyStage's slot
+ * table), so the gateway keeps six.  The contents are server state — the retail
+ * room protocol is not recoverable — but the *shape* is the client's.
+ */
+export type RoomState = 0 | 1 | 2; // waiting | playing | locked
+
+export interface Room {
+  slot: number;
+  name: string;
+  players: number;
+  capacity: number;
+  state: RoomState;
+  map: string;
+}
+
+export const SLOT_COUNT = 6;
+
+/**
+ * Map names are ASCII: the client can *decode* Big5 but nothing here can
+ * *encode* it, so a Chinese label authored on the server would arrive as
+ * mojibake.  The retail map names live in the client's own data
+ * (fxdynmapinfo.ssd) and are drawn from there, not sent over the wire.
+ */
+const MAPS = ['BnB Town', 'Forest', 'Desert', 'Ice Field', 'Pirate Ship', 'Ghost Castle'];
+
+function blankRooms(): Room[] {
+  return Array.from({ length: SLOT_COUNT }, (_, slot) => ({
+    slot,
+    name: `Room ${slot + 1}`,
+    players: slot < 3 ? 1 + (slot % 2) : 0,
+    capacity: 8,
+    state: (slot < 3 ? 0 : 1) as RoomState,
+    map: MAPS[slot % MAPS.length]!,
+  }));
+}
+
+let ROOMS: Room[] = blankRooms();
 
 const ROOT = new URL('..', import.meta.url).pathname;
 /**
@@ -125,6 +180,35 @@ export function attachGateway(lobby: Lobby): void {
         }
         peerChannel.set(peer, idx);
         sendJoinResult(peer, true, idx, '');
+        sendRooms(peer);
+        return;
+      }
+      case OP.EnterRoom: {
+        const r = new PacketReader(body);
+        const slot = r.u16();
+        const room = ROOMS[slot];
+        if (!room) {
+          sendEnterResult(peer, false, slot, 'no such room');
+          return;
+        }
+        if (room.players >= room.capacity) {
+          sendEnterResult(peer, false, slot, 'room full');
+          return;
+        }
+        peerRoom.set(peer, slot);
+        room.players = Math.min(room.capacity, room.players + 1);
+        sendEnterResult(peer, true, slot, '');
+        sendRooms(peer);
+        return;
+      }
+      case OP.LeaveRoom: {
+        const slot = peerRoom.get(peer);
+        if (slot !== undefined) {
+          const room = ROOMS[slot];
+          if (room) room.players = Math.max(0, room.players - 1);
+          peerRoom.delete(peer);
+        }
+        sendRooms(peer);
         return;
       }
       case 0x7f: {
@@ -143,6 +227,29 @@ function sendLoginResult(peer: PeerSocket, ok: boolean, message: string): void {
   w.u8(ok ? 1 : 0);
   str(w, message);
   peer.send(OP.LoginResult, w.finish());
+}
+
+function sendEnterResult(peer: PeerSocket, ok: boolean, slot: number, message: string): void {
+  const w = new PacketWriter();
+  w.u8(ok ? 1 : 0);
+  w.u16(slot);
+  str(w, message);
+  peer.send(OP.EnterResult, w.finish());
+}
+
+/** Rooms are announced after a channel join, the way the client expects. */
+export function sendRooms(peer: PeerSocket): void {
+  const w = new PacketWriter();
+  w.u16(ROOMS.length);
+  for (const r of ROOMS) {
+    w.u16(r.slot);
+    str(w, r.name);
+    w.u16(r.players);
+    w.u16(r.capacity);
+    w.u8(r.state);
+    str(w, r.map);
+  }
+  peer.send(OP.RoomList, w.finish());
 }
 
 function sendJoinResult(peer: PeerSocket, ok: boolean, channelId: number, message: string): void {

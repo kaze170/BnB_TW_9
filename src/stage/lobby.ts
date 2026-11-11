@@ -1,0 +1,320 @@
+/**
+ * Lobby stage — CLobbyStage.
+ *
+ * The art is `Channel/CAStage`, an 800x600 JPEG in Fx.idd: six room slots in a
+ * 2x3 grid, the player list down the right, the chat panel and the button row
+ * along the bottom.  The executable's own slot table corroborates the grid —
+ * `CLobbyStage`'s constructor lays out exactly six session slots.
+ *
+ * Measured off the decoded JPEG (re-measured by tools/render-lobby.ts):
+ *   room grid   x 24..302 / 305..583, y 102..182 / 183..263 / 264..344
+ *               (278x80 per slot, 3px gutters)
+ *   player list x 640..772, first row y 108, 23px rows
+ *   chat panel  x 24..583, y 400..520
+ *   button row  y 528..556
+ *
+ * The six slots are the retail count.  Rooms themselves are server state — the
+ * retail protocol for them is not recoverable — so this stage draws the slots
+ * it can see and leaves the occupancy to the gateway.
+ */
+
+import type { DrawQuad, SpriteRenderer } from '../gfx/renderer.ts';
+import { drawText } from '../ui/text.ts';
+
+export const SCREEN_W = 800;
+export const SCREEN_H = 600;
+
+/**
+ * Six room slots, in screen coordinates.
+ *
+ * The hit boxes are the 278x80 cells the lobby art draws.  Each cell is
+ * filled with `Channel/BtSessionSlot` (274x76, four frames: idle, pressed,
+ * hover, selected-yellow), which carries the inner layout:
+ *
+ *   title bar  y 11..38   small tag  x 10..57   room name  x 58..263
+ *   bottom row y 46..68   three wells: x 15..99, x 100..220, x 224..265
+ */
+export const SLOTS: { x: number; y: number; w: number; h: number }[] = (() => {
+  const xs = [24, 305] as const;
+  const ys = [102, 183, 264] as const;
+  const out: { x: number; y: number; w: number; h: number }[] = [];
+  for (const y of ys) for (const x of xs) out.push({ x, y, w: 278, h: 80 });
+  return out;
+})();
+
+/** Where text goes inside one `BtSessionSlot` (slot-local pixels). */
+export const SLOT_FIELDS = {
+  tag: { x: 10, y: 11, w: 47, h: 27 },
+  name: { x: 58, y: 11, w: 205, h: 27 },
+  field1: { x: 15, y: 46, w: 84, h: 22 },
+  field2: { x: 100, y: 46, w: 120, h: 22 },
+  field3: { x: 224, y: 46, w: 41, h: 22 },
+} as const;
+
+/** BtSessionSlot frames. */
+export const SLOT_FRAME = { idle: 0, pressed: 1, hover: 2, selected: 3 } as const;
+
+/** Player list, right-hand column. */
+export const PLAYERS = { x: 640, y: 108, w: 132, rowH: 23, rows: 16 } as const;
+/** Chat panel. */
+export const CHAT = { x: 24, y: 400, w: 559, h: 120 } as const;
+/**
+ * Two slots in the bottom bar.  The art draws exactly two wells there
+ * (x 34..144 and 147..572, y 529..553); the first is the input line, the
+ * second the button strip.  Nothing else in the bar is chrome.
+ */
+export const BAR = { y: 529, h: 24, wells: [
+  { x: 34, w: 110 },
+  { x: 147, w: 425 },
+] as const };
+
+export interface RoomSlot {
+  id: number;
+  name: string;
+  /** occupied players / capacity */
+  players: number;
+  capacity: number;
+  /** locked / playing / waiting — server-defined */
+  state: 'waiting' | 'playing' | 'locked';
+  map: string;
+}
+
+export interface LobbyPlayer {
+  name: string;
+  level: number;
+}
+
+/**
+ * The retail bar's buttons are drawn art plus a string table we have not
+ * recovered, so no labels are invented here: the stage reports intent
+ * (`exit`, `channel`) and leaves the bar's text to the string pass.
+ */
+export type LobbyAction = 'exit' | 'channel';
+
+export class LobbyStage {
+  private readonly renderer: SpriteRenderer;
+  private texture: GPUTexture | null = null;
+  private slotTex: GPUTexture | null = null;
+  private slotFrames: { sx: number; sy: number; sw: number; sh: number }[] = [];
+  private slots: (RoomSlot | null)[] = [];
+  private players: LobbyPlayer[] = [];
+  private selected = 0;
+  private hovered: number | null = null;
+  private chat: string[] = [];
+  private input = '';
+  private onAction: ((action: LobbyAction, slot: RoomSlot | null) => void) | null = null;
+  private onJoin: ((slot: RoomSlot) => void) | null = null;
+
+  constructor(renderer: SpriteRenderer) {
+    this.renderer = renderer;
+  }
+
+  setBackground(bitmap: ImageBitmap): void {
+    this.texture = this.renderer.createTexture(bitmap);
+  }
+
+  /**
+   * `Channel/BtSessionSlot`: 274x76, four frames.  Frames 0 and 2 share the
+   * same sheet rectangle, so the sheet offsets are passed in rather than
+   * derived from the frame index.
+   */
+  setSlotArt(
+    bitmap: ImageBitmap,
+    frames: { sx: number; sy: number; sw: number; sh: number }[],
+  ): void {
+    this.slotTex = this.renderer.createTexture(bitmap);
+    this.slotFrames = frames;
+  }
+
+  /** Six slots, in the retail order (row-major through the 2x3 grid). */
+  setSlots(slots: (RoomSlot | null)[]): void {
+    this.slots = slots.slice(0, SLOTS.length);
+    while (this.slots.length < SLOTS.length) this.slots.push(null);
+    if (this.selected >= this.slots.length) this.selected = 0;
+  }
+
+  setPlayers(players: LobbyPlayer[]): void {
+    this.players = players.slice();
+  }
+
+  setChat(lines: string[]): void {
+    this.chat = lines.slice(-6);
+  }
+
+  setHandlers(
+    onAction: (action: LobbyAction, slot: RoomSlot | null) => void,
+    onJoin: (slot: RoomSlot) => void,
+  ): void {
+    this.onAction = onAction;
+    this.onJoin = onJoin;
+  }
+
+  get selectedSlot(): RoomSlot | null {
+    return this.slots[this.selected] ?? null;
+  }
+
+  render(): void {
+    const r = this.renderer;
+    r.begin();
+    if (this.texture) {
+      r.draw({
+        texture: this.texture,
+        sx: 0,
+        sy: 0,
+        sw: SCREEN_W,
+        sh: SCREEN_H,
+        dx: 0,
+        dy: 0,
+        dw: SCREEN_W,
+        dh: SCREEN_H,
+      } satisfies DrawQuad);
+    }
+    if (this.slotTex) {
+      for (let i = 0; i < SLOTS.length; i++) {
+        const s = SLOTS[i]!;
+        const f =
+          this.slotFrames[
+            i === this.selected ? SLOT_FRAME.selected : i === this.hovered ? SLOT_FRAME.hover : SLOT_FRAME.idle
+          ];
+        if (!f) continue;
+        r.draw({
+          texture: this.slotTex,
+          sx: f.sx,
+          sy: f.sy,
+          sw: f.sw,
+          sh: f.sh,
+          dx: s.x + 2,
+          dy: s.y + 2,
+          dw: f.sw,
+          dh: f.sh,
+        } satisfies DrawQuad);
+      }
+    }
+    r.end();
+  }
+
+  renderOverlay(ctx: CanvasRenderingContext2D): void {
+    // Room slots.  The art draws the frames; the text is ours.
+    for (let i = 0; i < SLOTS.length; i++) {
+      const s = SLOTS[i]!;
+      const room = this.slots[i] ?? null;
+      const o = { x: s.x + 2, y: s.y + 2 };
+      if (!room) continue;
+
+      // BtSessionSlot's inner fields, measured off the sheet.
+      drawText(ctx, room.name, o.x + SLOT_FIELDS.name.x + 6, o.y + SLOT_FIELDS.name.y + 7, {
+        size: 13,
+        colour: '#ffffff',
+      });
+      drawText(ctx, room.map, o.x + SLOT_FIELDS.field1.x + 6, o.y + SLOT_FIELDS.field1.y + 5, {
+        size: 11,
+        colour: '#dff0ff',
+      });
+      const stateText =
+        room.state === 'playing' ? '遊戲中' : room.state === 'locked' ? '密碼' : '等待中';
+      drawText(ctx, stateText, o.x + SLOT_FIELDS.field2.x + 6, o.y + SLOT_FIELDS.field2.y + 5, {
+        size: 11,
+        colour: '#dff0ff',
+      });
+      drawText(ctx, `${room.players}/${room.capacity}`, o.x + SLOT_FIELDS.field3.x + 20, o.y + SLOT_FIELDS.field3.y + 5, {
+        size: 11,
+        colour: room.players >= room.capacity ? '#ffb0b0' : '#ffffff',
+        align: 'center',
+      });
+    }
+
+    // Player list.
+    for (let i = 0; i < Math.min(this.players.length, PLAYERS.rows); i++) {
+      const p = this.players[i]!;
+      const y = PLAYERS.y + i * PLAYERS.rowH;
+      drawText(ctx, p.name, PLAYERS.x + 6, y + 4, { size: 12, colour: '#ffffff' });
+      drawText(ctx, String(p.level), PLAYERS.x + PLAYERS.w - 6, y + 4, {
+        size: 11,
+        colour: '#bfe0ff',
+        align: 'right',
+      });
+    }
+
+    // Chat lines.
+    for (let i = 0; i < this.chat.length; i++) {
+      drawText(ctx, this.chat[i]!, CHAT.x + 10, CHAT.y + 10 + i * 17, { size: 12, colour: '#dff0ff' });
+    }
+
+    // The empty input line in the bar's first well.
+    drawText(ctx, this.input, BAR.wells[0]!.x + 6, BAR.y + 5, { size: 12, colour: '#ffffff' });
+    if (this.input === '') {
+      drawText(ctx, '_', BAR.wells[0]!.x + 6, BAR.y + 5, { size: 12, colour: '#9dc4e8' });
+    }
+  }
+
+  private hitSlot(x: number, y: number): number {
+    return SLOTS.findIndex((s) => x >= s.x && x < s.x + s.w && y >= s.y && y < s.y + s.h);
+  }
+
+  /** The second well holds the retail button strip; until its hit boxes are
+   *  recovered, only the keyboard drives it. */
+  private hitButton(x: number, y: number): LobbyAction | null {
+    if (y < BAR.y || y >= BAR.y + BAR.h) return null;
+    if (x >= BAR.wells[1]!.x && x < BAR.wells[1]!.x + BAR.wells[1]!.w) return 'channel';
+    return null;
+  }
+
+  handlePointerMove(x: number, y: number): void {
+    const i = this.hitSlot(x, y);
+    this.hovered = i >= 0 ? i : null;
+  }
+
+  handleClick(x: number, y: number): void {
+    const action = this.hitButton(x, y);
+    if (action) {
+      this.onAction?.(action, this.selectedSlot);
+      return;
+    }
+    const slot = this.hitSlot(x, y);
+    if (slot < 0) return;
+    // Clicking a slot selects it; clicking it again (or double-click) joins.
+    if (slot === this.selected) {
+      const room = this.slots[slot];
+      if (room) this.onJoin?.(room);
+      return;
+    }
+    this.selected = slot;
+  }
+
+  handleKey(ev: KeyboardEvent): void {
+    const cols = 2;
+    if (ev.key === 'Backspace') {
+      this.input = this.input.slice(0, -1);
+      ev.preventDefault();
+      return;
+    }
+    if (ev.key.length === 1 && this.input.length < 60) {
+      this.input += ev.key;
+      ev.preventDefault();
+      return;
+    }
+    if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+      const d = ev.key === 'ArrowRight' ? 1 : -1;
+      this.selected = Math.min(Math.max(this.selected + d, 0), SLOTS.length - 1);
+      ev.preventDefault();
+      return;
+    }
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      const d = (ev.key === 'ArrowDown' ? 1 : -1) * cols;
+      const next = this.selected + d;
+      if (next >= 0 && next < SLOTS.length) this.selected = next;
+      ev.preventDefault();
+      return;
+    }
+    if (ev.key === 'Enter') {
+      const room = this.slots[this.selected];
+      if (room) this.onJoin?.(room);
+      ev.preventDefault();
+      return;
+    }
+    if (ev.key === 'Escape') {
+      this.onAction?.('exit', null);
+      ev.preventDefault();
+    }
+  }
+}

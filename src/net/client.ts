@@ -40,7 +40,43 @@ export const OP = {
   JoinChannel: 0x13,
   /** server -> client: join result, body = u8 ok, u16 channelId, str16(message) */
   JoinResult: 0x14,
+  /** server -> client: room list, body = u16 count, count * room record */
+  RoomList: 0x15,
+  /** client -> server: enter room, body = u16 slot */
+  EnterRoom: 0x16,
+  /** server -> client: enter result, body = u8 ok, u16 slot, str16(message) */
+  EnterResult: 0x17,
+  /** client -> server: leave the current room, no body */
+  LeaveRoom: 0x18,
 } as const;
+
+/** One room, as carried by RoomList. */
+export interface RoomInfo {
+  slot: number;
+  name: string;
+  players: number;
+  capacity: number;
+  state: number;
+  map: string;
+}
+
+/** Decode a RoomList body. */
+export function decodeRoomList(body: Uint8Array): RoomInfo[] {
+  const r = new PacketReader(body);
+  const count = r.u16();
+  const text = new TextDecoder('big5');
+  const out: RoomInfo[] = [];
+  for (let i = 0; i < count; i++) {
+    const slot = r.u16();
+    const name = text.decode(r.str16());
+    const players = r.u16();
+    const capacity = r.u16();
+    const state = r.u8();
+    const map = text.decode(r.str16());
+    out.push({ slot, name, players, capacity, state, map });
+  }
+  return out;
+}
 
 /** One channel row, as carried by ChannelList. */
 export interface ChannelInfo {
@@ -148,6 +184,16 @@ export class GameSocket {
   send(op: number, body: Uint8Array = new Uint8Array(0)): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     this.ws.send(encodeFrame(op, body, this.cipher));
+  }
+
+  enterRoom(slot: number): void {
+    const w = new PacketWriter();
+    w.u16(slot);
+    this.send(OP.EnterRoom, w.finish());
+  }
+
+  leaveRoom(): void {
+    this.send(OP.LeaveRoom, new Uint8Array(0));
   }
 
   joinChannel(index: number): void {

@@ -14,7 +14,7 @@
  * so a regression in either the parser or the wire format is caught.
  */
 
-import { GameSocket, OP, decodeChannelList } from '../src/net/client.ts';
+import { GameSocket, OP, decodeChannelList, decodeRoomList } from '../src/net/client.ts';
 import { readChannelFile } from '../src/data/channel.ts';
 import { readServerList, mergeWithBuiltins } from '../src/data/serverlist.ts';
 
@@ -57,6 +57,9 @@ interface Result {
   channels: ReturnType<typeof decodeChannelList>;
   joinOk: boolean;
   joinChannelId: number;
+  rooms: ReturnType<typeof decodeRoomList>;
+  enterOk: boolean;
+  enterSlot: number;
   closed: boolean;
 }
 
@@ -66,6 +69,9 @@ const result: Result = {
   channels: [],
   joinOk: false,
   joinChannelId: -1,
+  rooms: [],
+  enterOk: false,
+  enterSlot: -1,
   closed: false,
 };
 
@@ -104,6 +110,19 @@ await new Promise<void>((resolve) => {
       if (op === OP.JoinResult) {
         result.joinOk = body[0] === 1;
         result.joinChannelId = (body[1]! << 8) | body[2]!;
+        return;
+      }
+      if (op === OP.RoomList) {
+        result.rooms = decodeRoomList(body);
+        const free = result.rooms.find((r) => r.players < r.capacity);
+        if (free) sock.enterRoom(free.slot);
+        else sock.close();
+        return;
+      }
+      if (op === OP.EnterResult) {
+        result.enterOk = body[0] === 1;
+        result.enterSlot = (body[1]! << 8) | body[2]!;
+        sock.leaveRoom();
         sock.close();
         return;
       }
@@ -127,6 +146,16 @@ check(
 );
 check('join by index accepted', result.joinOk);
 check('join returned the requested channel id', result.joinChannelId === 3, `got ${result.joinChannelId}`);
+check(
+  `room list has the six CLobbyStage slots (${result.rooms.length})`,
+  result.rooms.length === 6 && result.rooms.every((r, i) => r.slot === i),
+  result.rooms.map((r) => `#${r.slot}`).join(' '),
+);
+check(
+  'room records are internally consistent',
+  result.rooms.every((r) => r.players <= r.capacity && r.capacity > 0 && r.name !== ''),
+);
+check('entering a room was accepted', result.enterOk, `slot ${result.enterSlot}`);
 
 console.log(failures === 0 ? '\nlobby checks passed' : `\n${failures} check(s) failed`);
 if (failures > 0) process.exit(1);
