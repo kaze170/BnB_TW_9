@@ -8,11 +8,14 @@
     "extract": "bun run tools/extract.ts",
     "dev": "bun run server/index.ts",
     "build": "bun build src/main.ts --outdir public/build --target browser --minify",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:webgpu": "node tools/check-webgpu.mjs"
   },
   "devDependencies": {
     "@types/bun": "^1.4.4",
     "@webgpu/types": "^0.1.60",
+    "playwright-core": "^1.65.0",
+    "pngjs": "^7.0.0",
     "typescript": "7.1.0-beta"
   }
 }

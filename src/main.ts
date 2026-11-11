@@ -47,7 +47,14 @@ async function main(): Promise<void> {
 
   const assets = new GameAssets('/game');
   const device = await requestDevice();
-  log(`webgpu: ${device.adapterInfo?.description ?? 'adapter ready'}`);
+  log(`webgpu: ${device.adapterInfo?.description || 'adapter ready'}`);
+  device.addEventListener('uncapturederror', (event) => {
+    log(`WebGPU error: ${event.error.message}`);
+    console.error('WebGPU error:', event.error);
+  });
+  void device.lost.then((info) => {
+    log(`WebGPU device lost: ${info.message || info.reason}`);
+  });
 
   const renderer = new SpriteRenderer(device, canvas, SCREEN_W, SCREEN_H);
 
@@ -58,6 +65,10 @@ async function main(): Promise<void> {
   overlay.width = SCREEN_W;
   overlay.height = SCREEN_H;
   overlay.style.position = 'absolute';
+  overlay.style.left = '0';
+  overlay.style.top = '0';
+  overlay.style.width = `${SCREEN_W}px`;
+  overlay.style.height = `${SCREEN_H}px`;
   overlay.style.pointerEvents = 'none';
   canvas.parentElement?.style.setProperty('position', 'relative');
   canvas.after(overlay);
@@ -284,21 +295,27 @@ async function main(): Promise<void> {
   });
 
   const frame = (): void => {
-    ctx.clearRect(0, 0, SCREEN_W, SCREEN_H);
-    if (stage === 'login') {
-      login.render();
-      login.renderOverlay(ctx);
-    } else if (stage === 'server') {
-      server.render();
-      server.renderOverlay(ctx);
-    } else if (stage === 'channel') {
-      channel.render();
-      channel.renderOverlay(ctx);
-    } else {
-      lobby.render();
-      lobby.renderOverlay(ctx);
+    try {
+      ctx.clearRect(0, 0, SCREEN_W, SCREEN_H);
+      if (stage === 'login') {
+        login.render();
+        login.renderOverlay(ctx);
+      } else if (stage === 'server') {
+        server.render();
+        server.renderOverlay(ctx);
+      } else if (stage === 'channel') {
+        channel.render();
+        channel.renderOverlay(ctx);
+      } else {
+        lobby.render();
+        lobby.renderOverlay(ctx);
+      }
+      requestAnimationFrame(frame);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`Render error: ${message}`);
+      console.error('Render error:', err);
     }
-    requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
 }

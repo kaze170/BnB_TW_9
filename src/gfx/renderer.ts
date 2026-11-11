@@ -36,6 +36,7 @@ struct Globals {
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var image: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -77,7 +78,7 @@ fn vs(
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4f {
-  let tex = textureSample(samp, samp, in.uv);
+  let tex = textureSample(image, samp, in.uv);
   // Premultiplied-ish: the art is stored with a colour key, alpha is binary.
   return tex * in.color;
 }
@@ -95,7 +96,7 @@ export class SpriteRenderer {
   private readonly pipeline: GPURenderPipeline;
   private readonly sampler: GPUSampler;
   private readonly globals: GPUBuffer;
-  private readonly bindGroup: GPUBindGroup;
+  private readonly bindGroups = new WeakMap<GPUTexture, GPUBindGroup>();
   private instanceData: Float32Array;
   private instanceBuffer: GPUBuffer;
   private instanceCount = 0;
@@ -174,14 +175,6 @@ export class SpriteRenderer {
       size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    this.bindGroup = device.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.globals } },
-        { binding: 1, resource: this.sampler },
-      ],
-    });
-
     // 13 floats per instance: dst(4) src(4) colour(4) rotation(1)
     this.instanceData = new Float32Array(13 * 4096);
     this.instanceBuffer = device.createBuffer({
@@ -222,12 +215,14 @@ export class SpriteRenderer {
     return tex;
   }
 
-  begin() {
+  begin(clear = true) {
     this.instanceCount = 0;
     this.instanceCursor = 0;
     this.currentTexture = null;
-    this.stats.quads = 0;
-    this.stats.batchFlushes = 0;
+    if (clear) {
+      this.stats.quads = 0;
+      this.stats.batchFlushes = 0;
+    }
     // Open the pass here, not on the first flush: a frame that draws nothing
     // still has to clear the swapchain, otherwise the previous frame stays.
     this.pendingEncoder = this.device.createCommandEncoder();
@@ -237,27 +232,26 @@ export class SpriteRenderer {
         {
           view,
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          loadOp: 'clear',
+          loadOp: clear ? 'clear' : 'load',
           storeOp: 'store',
         },
       ],
     });
     this.pendingPass.setPipeline(this.pipeline);
-    this.pendingPass.setBindGroup(0, this.bindGroup);
     this.pendingPass.setVertexBuffer(0, this.instanceBuffer);
   }
 
   draw(q: DrawQuad) {
-    if (!this.currentTexture || this.currentTexture !== q.texture) {
+    if ((this.instanceCursor + this.instanceCount + 1) * 52 > this.instanceBuffer.size) {
+      // Submit the full buffer before reusing it, preserving the current frame.
+      this.end();
+      this.begin(false);
+    } else if ((this.instanceCount + 1) * 13 > this.instanceData.length) {
+      this.flush();
+    }
+    if (this.currentTexture !== q.texture) {
       this.flush();
       this.currentTexture = q.texture;
-    }
-    if ((this.instanceCount + 1) * 13 > this.instanceData.length) this.flush();
-    if ((this.instanceCursor + this.instanceCount + 1) * 52 > this.instanceBuffer.size) {
-      // Out of ring space: stop the pass and open a fresh one next frame.
-      this.flush();
-      this.end();
-      this.begin();
     }
     const t = q.tint ?? [1, 1, 1, 1];
     const o = this.instanceCount * 13;
@@ -300,12 +294,25 @@ export class SpriteRenderer {
       0,
       bytes,
     );
+    if (!this.currentTexture) throw new Error('Sprite batch has no texture');
+    let bindGroup = this.bindGroups.get(this.currentTexture);
+    if (!bindGroup) {
+      bindGroup = this.device.createBindGroup({
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.globals } },
+          { binding: 1, resource: this.sampler },
+          { binding: 2, resource: this.currentTexture.createView() },
+        ],
+      });
+      this.bindGroups.set(this.currentTexture, bindGroup);
+    }
+    this.pendingPass.setBindGroup(0, bindGroup);
     this.pendingPass.setVertexBuffer(0, this.instanceBuffer, first * 52, this.instanceCount * 52);
     this.pendingPass.draw(6, this.instanceCount);
     this.stats.batchFlushes++;
     this.instanceCursor += this.instanceCount;
     this.instanceCount = 0;
-    this.currentTexture = null;
   }
 
   /** Finish the frame (flushes the last batch and submits). */
