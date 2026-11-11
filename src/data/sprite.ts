@@ -77,14 +77,20 @@ export function decodeDepth4(
   const guardMax = src.length + width * height * 2 + 64;
 
   for (let guard = 0; line < height; guard++) {
+    // Running out of input is normal: the packer truncates an image as soon as
+    // the remaining scan lines would be fully transparent, so a short stream
+    // means "the rest is blank", not a decode failure.
     if (guard > guardMax || sp >= src.length) {
-      overrun = sp >= src.length;
       break;
     }
     const c = src[sp++];
     if ((c & 0x80) === 0) {
       if (c & 0x40) {
         // packed run of one colour
+        if (sp + 2 > src.length) {
+          overrun = true;
+          break;
+        }
         const col = expand16(dv.getUint16(sp, true));
         sp += 2;
         const n = c & 0x3f;
@@ -99,6 +105,10 @@ export function decodeDepth4(
       } else if (c > 0) {
         // literal run
         for (let i = 0; i < c; i++) {
+          if (sp + 2 > src.length) {
+            overrun = true;
+            break;
+          }
           const col = expand16(dv.getUint16(sp, true));
           sp += 2;
           const idx = line * width + written;
@@ -132,6 +142,7 @@ export function decodeDepth4(
     if (written === width) {
       written = 0;
       line++;
+      if (sp >= src.length) break;
     } else if (written > width) {
       // The original would paint past the line end; it then never matches
       // `width` again and the stream desynchronises. Reproduce by
@@ -235,55 +246,10 @@ function i32(dv: DataView, o: number): number {
  * entries all carry a single image.
  */
 function decodeCDataI16Image(buf: Uint8Array): SpriteSheet | null {
-  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const count = u32(dv, 0);
-  const images = u32(dv, 8);
-  if (count < 1 || count > 8192) return null;
-  if (images < 1 || images > 256) return null;
-  const imgTable = 16 + 8 * images;
-  const tableEnd = imgTable + 48 * count;
-  if (tableEnd > buf.length) return null;
-
-  const placements: { h: number; w: number }[] = [];
-  let sheetW = 0;
-  let sheetH = 0;
-  for (let i = 0; i < images; i++) {
-    const o = 16 + 8 * i;
-    const rec = { h: u32(dv, o), w: u32(dv, o + 4) };
-    placements.push(rec);
-    if (rec.w > sheetW) sheetW = rec.w;
-    if (rec.h > sheetH) sheetH = rec.h;
-  }
-  if (sheetW < 1 || sheetW > 8192 || sheetH < 1 || sheetH > 8192) return null;
-
-  const rects: SpriteRect[] = [];
-  for (let i = 0; i < count; i++) {
-    const o = imgTable + 48 * i;
-    rects.push({
-      x0: i32(dv, o + 16),
-      y0: i32(dv, o + 20),
-      x1: i32(dv, o + 24),
-      y1: i32(dv, o + 28),
-      pivotX: i32(dv, o + 32),
-      pivotY: i32(dv, o + 36),
-      anchorX: i32(dv, o + 40),
-      anchorY: i32(dv, o + 44),
-      frame: i32(dv, o + 8),
-      pad: i32(dv, o + 12),
-    });
-  }
-
-  const res = decodeDepth4(buf.subarray(tableEnd), sheetW, sheetH, true);
-  return {
-    count,
-    variant: 2,
-    sheetW,
-    sheetH,
-    rects,
-    images: [{ w: sheetW, h: sheetH, pixels: res.pixels, written: res.written, overrun: res.overrun }],
-    pixels: res.pixels,
-    written: res.written,
-  };
+  // Variant 2 is the multi-image layout shared by SkinRsc, Cx thumnails, Fx,
+  // CharTE and EmoTE: the pixel stream is a sequence of {u32 size, bytes}
+  // blocks, one per image, and walking them lands exactly on EOF.
+  return decodeCDataI16Character(buf);
 }
 
 export function decodeCDataI16(buf: Uint8Array): SpriteSheet | null {
@@ -358,7 +324,7 @@ export function decodeCDataI16Character(buf: Uint8Array): SpriteSheet | null {
   const images = u32(dv, 8);
   if (frames < 1 || frames > 8192) return null;
   if (variant < 1 || variant > 8) return null;
-  if (images < 1 || images > 256) return null;
+  if (images < 1 || images > 8192) return null;
 
   const dimOff = 16;
   const recOff = dimOff + 8 * images;
