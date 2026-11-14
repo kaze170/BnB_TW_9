@@ -1,310 +1,502 @@
-/**
- * Web client entry point.
- *
- * Boot order mirrors the original EXE:
- *   CMainWnd creates the stages, the first stage is CLoginStage
- *   (see the stage table in CMainWnd::possible_ctor_or_dtor), which loads
- *   SkinDsc + SkinRsc and paints LoginStage.  A successful login goes to
- *   CStageChannel, whose art is `Cx`'s StageChannel/CAStage JPEG and whose rows
- *   come from the retail channel table.
- */
+// Browser entrypoint: WebGPU 800x600 canvas, GameAssets, SoundManager,
+// ClientHub, DialogStack, GlobalButtonBar (`CGlobalButtonDlg`), retail `Cx:Etc/Cursor`,
+// and `CMainWnd` 11-stage state machine (`sub_4C8CE5`).
 
-import { GameAssets } from './data/assets.ts';
-import { SpriteRenderer, requestDevice } from './gfx/renderer.ts';
-import { LoginStage, SCREEN_H, SCREEN_W } from './stage/login.ts';
-import { ChannelStage } from './stage/channel.ts';
-import { SelectServerStage, type RealmRow } from './stage/selectserver.ts';
-import { LobbyStage, type LobbyAction, type RoomSlot } from './stage/lobby.ts';
-import { readServerList, mergeWithBuiltins } from './data/serverlist.ts';
-import { GameSocket, OP, decodeChannelList, decodeRoomList } from './net/client.ts';
+import { GameAssets, type LoadedSheet } from "./data/assets.ts";
+import { SoundManager } from "./audio/sound.ts";
+import { SpriteRenderer, requestDevice } from "./gfx/renderer.ts";
+import { ClientHub } from "./net/hub.ts";
+import { imeHost } from "./ui/ime.ts";
+import { GlobalButtonBar, drawSheetFrame } from "./ui/widgets.ts";
+import {
+  BnbMessengerDlg,
+  ColorPencilDlg,
+  DialogStack,
+  HelpDlg,
+  KeyMapDlg,
+  MyPageDlg,
+  NoSpeakDlg,
+  NoticeDlg,
+  OptionDlg,
+  RefusalListDlg,
+  SmsFriendDlg,
+  SpeakerPopupOverlay,
+  UserInfoDlg,
+} from "./ui/dialogs.ts";
+import { TitleStage } from "./stage/title.ts";
+import { LoginStage } from "./stage/login.ts";
+import { CreditStage } from "./stage/credit.ts";
+import { SelectServerStage } from "./stage/selectserver.ts";
+import { LobbyStage } from "./stage/channel.ts";
+import { PrepareStage } from "./stage/prepare.ts";
+import { GameStage } from "./stage/game.ts";
+import { ShopStage } from "./stage/shop.ts";
+import { ChattingStage } from "./stage/chatting.ts";
+import { ExchangeStage } from "./stage/exchange.ts";
+import type { AppContext, Stage, StageId } from "./stage/types.ts";
 
-const logEl = document.getElementById('log');
-function log(msg: string): void {
-  if (!logEl) return;
-  logEl.textContent = `${msg}\n${logEl.textContent ?? ''}`.slice(0, 4000);
-}
+const SCREEN_W = 800;
+const SCREEN_H = 600;
 
-type Stage = 'login' | 'server' | 'channel' | 'lobby';
+async function boot(): Promise<void> {
+  const frame = document.getElementById("frame") as HTMLElement | null;
+  const canvas = (document.getElementById("screen") ??
+    document.getElementById("game") ??
+    document.querySelector("canvas")) as HTMLCanvasElement | null;
+  const fallback = document.getElementById("fallback") as HTMLElement | null;
+  if (!canvas) throw new Error("Missing #screen canvas");
 
-/**
- * The `str16` at `off` (u16 length, then bytes), as latin1.
- *
- * The gateway puts csysstr.ssd *keys* on the wire, and those keys are ASCII by
- * construction (`SameRoomExist`, `NoEmptySlot`, …), so latin1 round-trips them
- * exactly and no Big5 encoder is needed.
- */
-function str16At(bytes: Uint8Array, off: number): string {
-  if (off + 2 > bytes.length) return '';
-  const n = (bytes[off]! << 8) | bytes[off + 1]!;
-  const s = off + 2;
-  if (s + n > bytes.length) return '';
-  return new TextDecoder('latin1').decode(bytes.subarray(s, s + n));
-}
+  let renderer: SpriteRenderer;
+  try {
+    const device = await requestDevice();
+    renderer = new SpriteRenderer(device, canvas, SCREEN_W, SCREEN_H);
+  } catch (err) {
+    console.error("WebGPU initialization failed:", err);
+    if (fallback) {
+      fallback.style.display = "flex";
+      fallback.textContent = `您的瀏覽器未啟用 WebGPU 支援 (${err instanceof Error ? err.message : String(err)})`;
+    }
+    return;
+  }
 
-async function main(): Promise<void> {
-  const canvas = document.getElementById('screen') as HTMLCanvasElement | null;
-  if (!canvas) throw new Error('#screen missing');
-
-  const assets = new GameAssets('/game');
-  const device = await requestDevice();
-  log(`webgpu: ${device.adapterInfo?.description ?? 'adapter ready'}`);
-
-  const renderer = new SpriteRenderer(device, canvas, SCREEN_W, SCREEN_H);
-
-  // The 2D overlay is the stand-in for GDI text; the canvas is shared through
-  // a second transparent canvas layered on top so WebGPU keeps its own
-  // swapchain.
-  const overlay = document.createElement('canvas');
-  overlay.width = SCREEN_W;
-  overlay.height = SCREEN_H;
-  overlay.style.position = 'absolute';
-  overlay.style.pointerEvents = 'none';
-  canvas.parentElement?.style.setProperty('position', 'relative');
-  canvas.after(overlay);
-  const ctx = overlay.getContext('2d');
-  if (!ctx) throw new Error('2d context unavailable');
-
-  const login = new LoginStage(assets, renderer);
-  await login.load((m) => log(m));
-  log('login stage ready');
-
-  const channel = new ChannelStage(renderer);
-  const server = new SelectServerStage(renderer);
-  const lobby = new LobbyStage(renderer);
-  let stage: Stage = 'login';
-  let lobbyReady = false;
-  const lobbyChat: string[] = [];
-  let channelsReady = false;
-  let serverReady = false;
-  let realms: RealmRow[] = [];
-
-  /** The retail realm list: multisvr.ssd plus the addresses in the EXE. */
-  const loadRealms = async (): Promise<RealmRow[]> => {
-    try {
-      const res = await fetch('/game/multisvr.ssd');
-      if (!res.ok) throw new Error(String(res.status));
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      const eps = mergeWithBuiltins(readServerList(bytes));
-      return eps.map((e) => ({ address: e.address, port: e.port, label: e.address }));
-    } catch {
-      return [];
+  // Fit 800x600 aspect-preserved inside viewport (1:1 crisp at >=800x600, scaled down if smaller)
+  const fitCanvas = (): void => {
+    const scale = Math.min(1, window.innerWidth / SCREEN_W, window.innerHeight / SCREEN_H);
+    const cssW = Math.max(400, Math.floor(SCREEN_W * scale));
+    const cssH = Math.max(300, Math.floor(SCREEN_H * scale));
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+    if (frame) {
+      frame.style.width = `${cssW}px`;
+      frame.style.height = `${cssH}px`;
     }
   };
+  fitCanvas();
+  window.addEventListener("resize", fitCanvas);
 
-  const showServers = async (): Promise<void> => {
-    if (!serverReady) {
-      const art = await assets.image('Cx', 'MultiServer/CAStage');
-      if (art) server.setBackground(art);
-      realms = await loadRealms();
-      server.setRows(realms, 0);
-      server.setHandlers(
-        (row) => {
-          log(`realm ${row.address}:${row.port}`);
-          // Picking a realm moves on to the channel list, the way
-          // CSelectServerStage hands the connection to CStageChannel.
-          void showChannels();
-        },
-        () => {
-          stage = 'login';
-        },
-      );
-      serverReady = true;
+  const assets = new GameAssets("/game");
+  assets.attachRenderer(renderer);
+  const sound = new SoundManager(assets);
+  const hub = new ClientHub();
+  const dialogs = new DialogStack();
+  const speakerOverlay = new SpeakerPopupOverlay();
+
+  if (fallback) {
+    fallback.style.display = "flex";
+    fallback.textContent = "正在載入爆爆王原始資源檔...";
+  }
+  await assets.boot();
+  if (fallback) {
+    fallback.style.display = "none";
+    fallback.textContent = "";
+  }
+  if (assets.font) {
+    renderer.setFont(assets.font);
+  }
+
+  // Custom retail cursor (`Cx:Etc/Cursor`: frame 0 normal, frame 1 down) + `CImeStatusWnd` (`Cx:Etc/ImeStatus`)
+  let cursorSheet: LoadedSheet | null = null;
+  let imeStatusSheet: LoadedSheet | null = null;
+  void assets.loadSheet("Cx", "Etc/Cursor").then((s) => {
+    cursorSheet = s;
+    if (s) canvas.style.cursor = "none";
+  });
+  void assets.loadSheet("Cx", "Etc/ImeStatus").then((s) => {
+    imeStatusSheet = s;
+  });
+  void speakerOverlay.load(assets);
+
+  let currentId: StageId = "title";
+
+  const openMyPage = (): void => {
+    dialogs.push(
+      new MyPageDlg(assets, hub, () => {
+        if (currentId !== "shop") void ctx.goto("shop");
+      }),
+    );
+  };
+  const openMessenger = (initialTarget?: string): void => {
+    if (initialTarget) {
+      dialogs.push(new SmsFriendDlg(assets, hub, initialTarget));
+      return;
     }
-    stage = 'server';
-    log(`server stage ready (${realms.length} realms)`);
+    dialogs.push(
+      new BnbMessengerDlg(assets, hub, {
+        onOpenSms: (target) => dialogs.push(new SmsFriendDlg(assets, hub, target ?? "")),
+        onOpenRefusal: () => dialogs.push(new RefusalListDlg(assets, hub)),
+      }),
+    );
   };
-
-  const showChannels = async (): Promise<void> => {
-    if (channelsReady) return;
-    const art = await assets.image('Cx', 'StageChannel/CAStage');
-    if (art) channel.setBackground(art);
-    channelsReady = true;
-    stage = 'channel';
-    log('channel stage ready');
+  const openMyInfo = (): void => {
+    dialogs.push(new UserInfoDlg(assets, hub, undefined, (u) => openMessenger(u)));
   };
+  hub.onOpenMessenger = () => openMessenger();
 
-  const showLobby = async (): Promise<void> => {
-    if (!lobbyReady) {
-      const art = await assets.image('Fx', 'Channel/CAStage');
-      if (art) lobby.setBackground(art);
-      // The room slots name their map from the shipped table, not the wire.
-      const mapFile = await assets.mapInfo();
-      if (mapFile) lobby.setMaps(mapFile.maps);
-      const slotSheet = await assets.sheet('Fx', 'Channel/BtSessionSlot');
-      const slotTex = await assets.texture('Fx', 'Channel/BtSessionSlot');
-      if (slotSheet && slotTex) {
-        lobby.setSlotArt(
-          slotTex,
-          slotSheet.rects.map((r) => ({
-            sx: r.x0,
-            sy: r.y0,
-            sw: r.x1 - r.x0,
-            sh: r.y1 - r.y0,
-          })),
-        );
+  // Global bottom bar (`CGlobalButtonDlg` `(0, 566, 800, 34)` + `CGlobalButtonMenuDlg`)
+  const globalBar = new GlobalButtonBar({
+    onBack: () => {
+      if (currentId === "prepare" || currentId === "chatting" || currentId === "exchange") {
+        hub.send({ type: "leave_room" });
+        void ctx.goto("lobby");
+      } else if (currentId === "practice") {
+        void ctx.goto("login");
+      } else if (currentId === "shop") {
+        void ctx.goto(ctx.returnStageAfterModal);
+      } else if (currentId === "lobby") {
+        void ctx.goto("selectserver");
+      } else if (currentId === "selectserver") {
+        void ctx.goto("login");
       }
-      lobby.setHandlers(
-        (action: LobbyAction, slot: RoomSlot | null) => {
-          if (action === 'exit') {
-            socket.leaveRoom();
-            void showChannels();
-            return;
-          }
-          if (action === 'channel') {
-            socket.leaveRoom();
-            void showChannels();
-            return;
-          }
-          if (action === 'quickjoin' && slot) {
-            socket.enterRoom(slot.id);
-            return;
-          }
-          log(`lobby action ${action}${slot ? ` on ${slot.name}` : ''}`);
-        },
-        (slot: RoomSlot) => socket.enterRoom(slot.id),
-      );
-      lobbyReady = true;
-    }
-    stage = 'lobby';
-    log('lobby stage ready');
-  };
-
-  const socket = new GameSocket({
-    open: () => log('socket connected'),
-    close: (code) => log(`socket closed (${code})`),
-    error: () => log('socket error'),
-    packet: (op, body) => {
-      if (op === OP.Confirm) {
-        log(`handshake: key 0x${(body[0] ?? 0).toString(16)}`);
-        return;
-      }
-      if (op === OP.LoginResult) {
-        const ok = body[0] === 1;
-        const msg = new TextDecoder('big5').decode(body.subarray(3, 3 + ((body[1]! << 8) | body[2]!)));
-        log(`login ${ok ? 'ok' : 'failed'}${msg ? `: ${msg}` : ''}`);
-        if (ok) void showServers();
-        return;
-      }
-      if (op === OP.ChannelList) {
-        const list = decodeChannelList(body);
-        log(`channels: ${list.map((c) => c.name).join(', ')}`);
-        channel.setChannels(list);
-        // The retail text for each channel's kind, straight from csysstr.ssd.
-        void Promise.all(list.map((c, i) => assets.channelDescription(i, c.kind))).then((d) =>
-          channel.setDescriptions(d),
-        );
-        return;
-      }
-      if (op === OP.JoinResult) {
-        const ok = body[0] === 1;
-        const channelId = (body[1]! << 8) | body[2]!;
-        log(`join ${ok ? 'ok' : 'failed'} (channel ${channelId})`);
-        if (ok) void showLobby();
-        return;
-      }
-      if (op === OP.RoomList) {
-        const rooms = decodeRoomList(body);
-        log(`rooms: ${rooms.map((r) => `${r.name} ${r.players}/${r.capacity}`).join(', ')}`);
-        lobby.setSlots(rooms.map((r) => ({
-          id: r.slot,
-          name: r.name,
-          players: r.players,
-          capacity: r.capacity,
-          state: r.state === 1 ? 'playing' : r.state === 2 ? 'locked' : 'waiting',
-          map: r.map,
-        })));
-        return;
-      }
-      if (op === OP.EnterResult) {
-        const ok = body[0] === 1;
-        const slot = (body[1]! << 8) | body[2]!;
-        // The message is a csysstr.ssd key; resolve it against the client's own
-        // string table instead of showing a server-authored sentence.
-        const key = str16At(body, 3);
-        void assets.systemString(key || '-').then((text) => {
-          const shown = text ?? key;
-          log(`enter room ${slot}: ${ok ? 'ok' : `failed (${shown})`}`);
-          if (!ok) {
-            lobbyChat.push(`[系統] ${shown}`);
-            lobby.setChat(lobbyChat.slice(-6));
-          }
-        });
-        return;
-      }
-      log(`packet 0x${op.toString(16)} (${body.length}B)`);
     },
-  });
-  const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
-  socket.connect(wsUrl).catch(() => log('server not reachable'));
-  login.setLoginHandler((id, pass) => {
-    log(`login ${id}`);
-    socket.login(id, pass);
+    onExit: () => {
+      dialogs.push(
+        new NoticeDlg(
+          assets,
+          "",
+          ["確定要離開目前頻道並返回登入畫面嗎？"],
+          () => {
+            if (hub.currentRoom) hub.send({ type: "leave_room" });
+            void ctx.goto("login");
+          },
+          true,
+        ),
+      );
+    },
+    onShop: () => {
+      if (currentId === "shop") return;
+      if (hub.currentRoom) hub.send({ type: "leave_room" });
+      void ctx.goto("shop");
+    },
+    onMyItem: () => openMyPage(),
+    onMessenger: () => openMessenger(),
+    onOption: () => dialogs.push(new OptionDlg(assets, sound, hub, (d) => dialogs.push(d))),
+    onHelp: () => dialogs.push(new HelpDlg(assets)),
+    onMyInfo: () => openMyInfo(),
   });
 
-  channel.setActionHandler((action, ch, index) => {
-    if (action === 'enter' && ch) {
-      log(`enter ${ch.name}`);
-      socket.joinChannel(index);
-      return;
+  const stages = new Map<StageId, Stage>();
+  let activeStage: Stage | null = null;
+
+  const ctx: AppContext = {
+    renderer,
+    assets,
+    sound,
+    hub,
+    dialogs,
+    globalBar,
+    practiceConfig: null,
+    returnStageAfterModal: "lobby",
+    goto: async (id: StageId) => {
+      if (currentId === "lobby" || currentId === "selectserver") {
+        ctx.returnStageAfterModal = currentId;
+      }
+      globalBar.closeMenu();
+      activeStage?.leave?.();
+      currentId = id;
+
+      // Match `CA.exe` `CGlobalButtonDlg` enabled/disabled button state per stage
+      globalBar.btShop.enabled = id !== "shop" && id !== "practice";
+      globalBar.btMyItem.enabled = id !== "practice";
+      globalBar.btMyInfo.enabled = id !== "practice";
+      globalBar.btMessenger.enabled = id !== "practice";
+
+      let next = stages.get(id);
+      if (!next) {
+        next = createStage(id, ctx);
+        stages.set(id, next);
+      }
+      activeStage = next;
+      await next.enter();
+    },
+  };
+
+  // Global loudspeaker banner & `CNoSpeakDlg` (`CA.exe.c:38655..38735`) listener
+  hub.onMessage((msg) => {
+    if (msg.type === "speaker_recv") {
+      speakerOverlay.trigger(msg.from, msg.text, msg.colorIdx ?? 0);
+      sound.playSfx("Connect", 0.7);
+    } else if (msg.type === "no_speaker") {
+      dialogs.push(
+        new NoSpeakDlg(assets, msg.kind, () => {
+          if (currentId !== "shop") {
+            if (hub.currentRoom) hub.send({ type: "leave_room" });
+            void ctx.goto("shop");
+          }
+        }),
+      );
     }
-    if (action === 'exit') {
-      stage = 'login';
-      return;
-    }
-    log(`action ${action}${ch ? ` on ${ch.name}` : ''}`);
   });
 
-  const toLogical = (ev: PointerEvent | MouseEvent): { x: number; y: number } => {
-    const r = canvas.getBoundingClientRect();
+  // Pointer coordinates in 800x600 virtual space
+  let mouseX = 400;
+  let mouseY = 300;
+  let mouseDown = false;
+  let mouseInside = false;
+
+  const toCanvasXY = (ev: MouseEvent): { x: number; y: number } => {
+    const rect = canvas.getBoundingClientRect();
     return {
-      x: ((ev.clientX - r.left) / r.width) * SCREEN_W,
-      y: ((ev.clientY - r.top) / r.height) * SCREEN_H,
+      x: Math.max(0, Math.min(SCREEN_W - 1, ((ev.clientX - rect.left) / rect.width) * SCREEN_W)),
+      y: Math.max(0, Math.min(SCREEN_H - 1, ((ev.clientY - rect.top) / rect.height) * SCREEN_H)),
     };
   };
 
-  canvas.addEventListener('pointermove', (ev) => {
-    const p = toLogical(ev);
-    if (stage === 'login') login.handlePointerMove(p.x, p.y);
-    else if (stage === 'server') server.handlePointerMove(p.x, p.y);
-    else if (stage === 'channel') channel.handlePointerMove(p.x, p.y);
-    else lobby.handlePointerMove(p.x, p.y);
+  canvas.addEventListener("pointerenter", () => {
+    mouseInside = true;
   });
-  canvas.addEventListener('pointerdown', (ev) => {
-    const p = toLogical(ev);
-    if (stage === 'login') login.handleClick(p.x, p.y);
-    else if (stage === 'server') server.handleClick(p.x, p.y);
-    else if (stage === 'channel') channel.handleClick(p.x, p.y);
-    else lobby.handleClick(p.x, p.y);
+  canvas.addEventListener("pointerleave", () => {
+    mouseInside = false;
+    mouseDown = false;
   });
-  window.addEventListener('keydown', (ev) => {
-    if (stage === 'login') login.handleKey(ev);
-    else if (stage === 'server') server.handleKey(ev);
-    else if (stage === 'channel') channel.handleKey(ev);
-    else lobby.handleKey(ev);
-  });
-
-  const frame = (): void => {
-    ctx.clearRect(0, 0, SCREEN_W, SCREEN_H);
-    if (stage === 'login') {
-      login.render();
-      login.renderOverlay(ctx);
-    } else if (stage === 'server') {
-      server.render();
-      server.renderOverlay(ctx);
-    } else if (stage === 'channel') {
-      channel.render();
-      channel.renderOverlay(ctx);
+  canvas.addEventListener("pointermove", (ev) => {
+    mouseInside = true;
+    const p = toCanvasXY(ev);
+    mouseX = p.x;
+    mouseY = p.y;
+    if (dialogs.active) {
+      dialogs.onMouseMove(p.x, p.y, sound);
     } else {
-      lobby.render();
-      lobby.renderOverlay(ctx);
+      activeStage?.onMouseMove?.(p.x, p.y);
     }
-    requestAnimationFrame(frame);
+  });
+  canvas.addEventListener("pointerdown", (ev) => {
+    sound.unlock();
+    mouseDown = true;
+    const p = toCanvasXY(ev);
+    mouseX = p.x;
+    mouseY = p.y;
+    if (dialogs.active) {
+      dialogs.onMouseDown(p.x, p.y, sound, ev.button);
+    } else {
+      activeStage?.onMouseDown?.(p.x, p.y, ev.button);
+    }
+  });
+  window.addEventListener("pointerup", (ev) => {
+    if (!mouseDown) return;
+    mouseDown = false;
+    const p = toCanvasXY(ev);
+    if (dialogs.active) {
+      dialogs.onMouseUp(p.x, p.y, sound, ev.button);
+    } else {
+      activeStage?.onMouseUp?.(p.x, p.y, ev.button);
+    }
+  });
+  canvas.addEventListener(
+    "wheel",
+    (ev) => {
+      ev.preventDefault();
+      const p = toCanvasXY(ev);
+      if (dialogs.active) {
+        dialogs.onWheel(ev.deltaY, p.x, p.y);
+      } else {
+        activeStage?.onWheel?.(ev.deltaY, p.x, p.y);
+      }
+    },
+    { passive: false },
+  );
+  canvas.addEventListener("dblclick", (ev) => {
+    if (ev.button !== 0 || !dialogs.active) return;
+    const p = toCanvasXY(ev);
+    dialogs.onDoubleClick(p.x, p.y, sound);
+  });
+  canvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
+
+  // Retail `CA.exe` `Fx:Help/Help` function keys:
+  //   F1 Help, F2 In-game ID on/off (Lobby: KeyMapDlg), F3 In-game SelfIndicator on/off (Lobby: ColorPencilDlg),
+  //   F4 / F12 / PrintScreen ScreenShot (`Wave/ScreenShot`), F5 Ready/Start (in PrepareStage),
+  //   F6 SpeechBalloon on/off, F7 SFX mute, F8 BGM mute, F9 Macro settings (`OptionDlg`)
+  let wantScreenshot = false;
+  let screenshotFlashUntilMs = 0;
+
+  window.addEventListener("keydown", (ev) => {
+    sound.unlock();
+    if (ev.key === "F1") {
+      ev.preventDefault();
+      if (!dialogs.active) dialogs.push(new HelpDlg(assets));
+      return;
+    }
+    if (ev.key === "F2") {
+      ev.preventDefault();
+      if (currentId === "game" && !dialogs.active) {
+        hub.showPlayerIds = !hub.showPlayerIds;
+        sound.playSfx("ButtonDown_0", 0.5);
+        hub.pushSystemChat(
+          hub.showPlayerIds ? "[系統] 遊戲中顯示玩家ID：開啟 (F2)" : "[系統] 遊戲中顯示玩家ID：關閉 (F2)",
+        );
+      } else if (!dialogs.active) {
+        dialogs.push(new KeyMapDlg(assets));
+      }
+      return;
+    }
+    if (ev.key === "F3") {
+      ev.preventDefault();
+      if (currentId === "game" && !dialogs.active) {
+        hub.showSelfIndicator = !hub.showSelfIndicator;
+        sound.playSfx("ButtonDown_0", 0.5);
+        hub.pushSystemChat(
+          hub.showSelfIndicator
+            ? "[系統] 自己位置指標 (SelfIndicator)：開啟 (F3)"
+            : "[系統] 自己位置指標 (SelfIndicator)：關閉 (F3)",
+        );
+      } else if (!dialogs.active && currentId !== "title" && currentId !== "login") {
+        dialogs.push(
+          new ColorPencilDlg(assets, hub, () => {
+            if (currentId !== "shop") {
+              if (hub.currentRoom) hub.send({ type: "leave_room" });
+              void ctx.goto("shop");
+            }
+          }),
+        );
+      }
+      return;
+    }
+    if (
+      (ev.key === "F4" && !ev.altKey && !ev.ctrlKey && !ev.metaKey) ||
+      (ev.key === "F12" && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey) ||
+      ev.key === "PrintScreen"
+    ) {
+      ev.preventDefault();
+      wantScreenshot = true;
+      sound.playSfx("ScreenShot", 0.9);
+      sound.playSfx("Flash", 0.55);
+      return;
+    }
+    if (ev.key === "F6") {
+      ev.preventDefault();
+      hub.showSpeechBalloons = !hub.showSpeechBalloons;
+      sound.playSfx("ButtonDown_0", 0.5);
+      hub.pushSystemChat(
+        hub.showSpeechBalloons ? "[系統] 對話氣球顯示：開啟 (F6)" : "[系統] 對話氣球顯示：關閉 (F6)",
+      );
+      return;
+    }
+    if (ev.altKey && /^Digit[0-9]$/.test(ev.code) && !dialogs.active) {
+      ev.preventDefault();
+      const digit = Number(ev.code.slice(5));
+      if (currentId === "lobby" || currentId === "prepare" || currentId === "practice" || currentId === "game" || currentId === "chatting") {
+        hub.triggerMacro(digit);
+      }
+      return;
+    }
+    if (ev.key === "F7") {
+      ev.preventDefault();
+      sound.setSfxVolume(sound.sfxVolume > 0.01 ? 0 : 0.8);
+      return;
+    }
+    if (ev.key === "F8") {
+      ev.preventDefault();
+      sound.setBgmVolume(sound.bgmVolume > 0.01 ? 0 : 0.45);
+      return;
+    }
+    if (ev.key === "F9") {
+      ev.preventDefault();
+      if (!dialogs.active && currentId !== "title") {
+        dialogs.push(new OptionDlg(assets, sound, hub, (d) => dialogs.push(d)));
+      }
+      return;
+    }
+
+    if (dialogs.active) {
+      dialogs.onKeyDown(ev);
+    } else {
+      activeStage?.onKeyDown?.(ev);
+    }
+  });
+  window.addEventListener("keyup", (ev) => {
+    // Gameplay releases must reach the stage even if a modal opened while a key was held.
+    if (!dialogs.active || currentId === "game") activeStage?.onKeyUp?.(ev);
+  });
+  window.addEventListener("blur", () => activeStage?.onBlur?.());
+
+  // Start at Stage 0 (`TitleStage`: `nm.bik` intro video -> `LoginStage`)
+  await ctx.goto("title");
+
+  let lastMs = performance.now();
+  const loop = (nowMs: number): void => {
+    const dtSec = Math.min(0.1, Math.max(0, (nowMs - lastMs) / 1000));
+    lastMs = nowMs;
+
+    activeStage?.tick(dtSec, nowMs);
+
+    renderer.begin([0, 0, 0, 1]);
+    activeStage?.render(renderer, nowMs);
+    speakerOverlay.render(renderer, nowMs);
+    dialogs.render(renderer, nowMs);
+
+    // Retail `CImeStatusWnd` (`Cx:Etc/ImeStatus` `34x17` frame 0 at `(761, 4)` when CJK IME active, `CA.exe.c:362175..362184`)
+    if (imeStatusSheet && imeHost.hasActiveFocus() && imeHost.imeStatusFrame() > 0 && !wantScreenshot) {
+      drawSheetFrame(renderer, imeStatusSheet, 0, 761, 4);
+    }
+
+    // Retail `Cx:Etc/Cursor` sprite drawn on top of everything in WebGPU
+    if (mouseInside && cursorSheet && !wantScreenshot) {
+      drawSheetFrame(renderer, cursorSheet, mouseDown ? 1 : 0, mouseX, mouseY);
+    }
+
+    if (nowMs < screenshotFlashUntilMs && !wantScreenshot) {
+      const a = Math.max(0, Math.min(0.85, (screenshotFlashUntilMs - nowMs) / 220));
+      renderer.fillRect(0, 0, SCREEN_W, SCREEN_H, [1, 1, 1, a]);
+    }
+
+    renderer.end();
+
+    if (wantScreenshot) {
+      wantScreenshot = false;
+      screenshotFlashUntilMs = nowMs + 220;
+      const d = new Date();
+      const pad2 = (n: number) => String(n).padStart(2, "0");
+      const fileName = `BnB_${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}.png`;
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+      }, "image/png");
+      hub.pushSystemChat(`[系統] 畫面已擷取儲存：${fileName}`);
+    }
+
+    requestAnimationFrame(loop);
   };
-  requestAnimationFrame(frame);
+  requestAnimationFrame(loop);
 }
 
-main().catch((err: unknown) => {
-  const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
-  log(msg);
-  console.error(err);
+function createStage(id: StageId, ctx: AppContext): Stage {
+  switch (id) {
+    case "title":
+      return new TitleStage(ctx);
+    case "login":
+      return new LoginStage(ctx);
+    case "credit":
+      return new CreditStage(ctx);
+    case "selectserver":
+      return new SelectServerStage(ctx);
+    case "lobby":
+      return new LobbyStage(ctx);
+    case "prepare":
+      return new PrepareStage(ctx, false);
+    case "practice":
+      return new PrepareStage(ctx, true);
+    case "game":
+      return new GameStage(ctx);
+    case "shop":
+      return new ShopStage(ctx);
+    case "chatting":
+      return new ChattingStage(ctx);
+    case "exchange":
+      return new ExchangeStage(ctx);
+  }
+}
+
+boot().catch((err) => {
+  console.error("[BnB boot error]", err);
+  const fallback = document.getElementById("fallback");
+  if (fallback) {
+    fallback.style.display = "flex";
+    fallback.textContent = `啟動發生錯誤：${err instanceof Error ? err.message : String(err)}`;
+  }
 });

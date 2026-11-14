@@ -8,7 +8,8 @@
     "extract": "bun run tools/extract.ts",
     "dev": "bun run server/index.ts",
     "build": "bun build src/main.ts --outdir public/build --target browser --minify",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "^1.4.4",

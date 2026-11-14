@@ -27,13 +27,15 @@
  * reaches the *width*; a run that overshoots keeps going into the next line
  * without rewinding. We reproduce that faithfully.
  *
- * Word layout: RGB565 stored big-endian; 0 is the transparent colour key
- * (`dword_62B548`).
+ * Word layout: RGB565 stored little-endian (`sub_579770`).
+ * Retail `CA.exe` (`L326928..326939`):
+ *   - `dword_62B548 = sub_570520(0xFF, 0, 0xFF) = 0xF81F` (magenta) is the transparent colour key.
+ *   - `dword_62B538 = RGB(0, 0, 0) = 0x0000` is 100% opaque pure black (character eyes, visors, outlines).
  */
 
 /** Pixel word -> display colour (0xAABBGGRR little endian, a=0 transparent). */
 export function expand16(p: number): number {
-  if (p === 0) return 0;
+  if (p === 0xf81f) return 0;
   const r = ((p >> 11) & 0x1f) << 3;
   const g = ((p >> 5) & 0x3f) << 2;
   const b = (p & 0x1f) << 3;
@@ -174,15 +176,22 @@ export interface SpriteRect {
   y0: number;
   x1: number;
   y1: number;
+  /** sprite hotspot / draw pivot (`drawX = anchorX - px`, `drawY = anchorY - py`) */
+  px: number;
+  py: number;
+  /** frame delay from 48-byte record (+8) */
+  delay: number;
+  /** source sub-image index from 48-byte record (+12) */
+  imgIdx: number;
   /** pivot / anchor (record +32..+39 in the 48-byte form) */
   pivotX: number;
   pivotY: number;
   /** second anchor pair (record +40..+47) */
   anchorX: number;
   anchorY: number;
-  /** frame index inside the image (`record +24`) */
+  /** frame index / raw record +0 */
   frame: number;
-  /** record +28 */
+  /** record +4 */
   pad: number;
 }
 
@@ -276,13 +285,19 @@ export function decodeCDataI16(buf: Uint8Array): SpriteSheet | null {
   let maxY = 0;
   for (let i = 0; i < count; i++) {
     const o = 16 + 28 * i;
+    const px = i32(dv, o + 16);
+    const py = i32(dv, o + 20);
     const r: SpriteRect = {
       x0: i32(dv, o),
       y0: i32(dv, o + 4),
       x1: i32(dv, o + 8),
       y1: i32(dv, o + 12),
-      pivotX: i32(dv, o + 16),
-      pivotY: i32(dv, o + 20),
+      px,
+      py,
+      delay: 1,
+      imgIdx: 0,
+      pivotX: px,
+      pivotY: py,
       anchorX: 0,
       anchorY: 0,
       frame: i32(dv, o + 24),
@@ -369,20 +384,36 @@ export function decodeCDataI16Character(buf: Uint8Array): SpriteSheet | null {
     if (off !== buf.length) return null;
   }
 
+  const imgXOff = new Int32Array(images);
+  let accW = 0;
+  for (let i = 0; i < images; i++) {
+    imgXOff[i] = accW;
+    accW += u32(dv, dimOff + 8 * i + 4);
+  }
+
   const rects: SpriteRect[] = [];
   for (let i = 0; i < frames; i++) {
     const o = recOff + 48 * i;
+    const px = i32(dv, o);
+    const py = i32(dv, o + 4);
+    const delay = i32(dv, o + 8);
+    const imgIdx = i32(dv, o + 12);
+    const baseOffX = imgIdx >= 0 && imgIdx < images ? imgXOff[imgIdx]! : 0;
     rects.push({
-      x0: i32(dv, o + 16),
+      x0: baseOffX + i32(dv, o + 16),
       y0: i32(dv, o + 20),
-      x1: i32(dv, o + 24),
+      x1: baseOffX + i32(dv, o + 24),
       y1: i32(dv, o + 28),
+      px,
+      py,
+      delay,
+      imgIdx,
       pivotX: i32(dv, o + 32),
       pivotY: i32(dv, o + 36),
       anchorX: i32(dv, o + 40),
       anchorY: i32(dv, o + 44),
-      frame: i32(dv, o),
-      pad: i32(dv, o + 4),
+      frame: px,
+      pad: py,
     });
   }
 
@@ -450,4 +481,35 @@ export function imageToRGBA(img: SpriteImage): Uint8ClampedArray {
     pixels: img.pixels,
     written: img.written,
   });
+}
+
+/**
+ * Detect & inflate `CData` zlib-wrapped archive payloads (`sub_566D80` compressed path,
+ * e.g. all 289 `Fx:Etc/<mapName>_mm` `198x171` minimap sprite sheets):
+ *   `+0 u32 compressedSize` (`buf.length - 8`)
+ *   `+4 u32 uncompressedSize`
+ *   `+8 zlib RFC 1950 stream (0x78 0x01|0x5E|0x9C|0xDA ...)`
+ */
+export function isBnbZlibPayload(buf: Uint8Array): boolean {
+  if (buf.byteLength < 12) return false;
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const compLen = dv.getUint32(0, true);
+  const uncompLen = dv.getUint32(4, true);
+  if (compLen !== buf.byteLength - 8 && compLen !== buf.byteLength - 12) return false;
+  if (uncompLen < 16 || uncompLen > 16 * 1024 * 1024) return false;
+  const cmf = buf[8]!;
+  const flg = buf[9]!;
+  return cmf === 0x78 && ((cmf * 256 + flg) % 31 === 0);
+}
+
+export async function inflateBnbZlib(buf: Uint8Array): Promise<Uint8Array> {
+  if (!isBnbZlibPayload(buf)) return buf;
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const compLen = dv.getUint32(0, true);
+  const ds = new DecompressionStream("deflate");
+  const writer = ds.writable.getWriter();
+  void writer.write(buf.subarray(8, 8 + compLen) as unknown as BufferSource);
+  void writer.close();
+  const ab = await new Response(ds.readable).arrayBuffer();
+  return new Uint8Array(ab);
 }

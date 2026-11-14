@@ -7,3 +7,4 @@ public/build/
 # python tooling
 __pycache__/
 *.pyc
+*.sqlite*

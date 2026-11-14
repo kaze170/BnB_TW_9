@@ -1,46 +1,61 @@
 <!doctype html>
-<html lang="ko">
+<html lang="zh-Hant">
   <head>
     <meta charset="utf-8" />
-    <title>Crazy Arcade</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>爆爆王 Crazy Arcade BnB (台灣零售版 v9)</title>
     <style>
       html,
       body {
         margin: 0;
+        padding: 0;
+        width: 100%;
         height: 100%;
-        background: #000;
+        background: radial-gradient(circle at center, #081832 0%, #020610 100%);
         overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
       }
       body {
         display: flex;
         align-items: center;
         justify-content: center;
-        font-family: "Dotum", "굴림", sans-serif;
+      }
+      #frame {
+        position: relative;
+        width: 800px;
+        height: 600px;
+        box-shadow:
+          0 0 0 2px rgba(96, 175, 255, 0.45),
+          0 24px 64px rgba(0, 0, 0, 0.85);
+        background: #000;
       }
       #screen {
         display: block;
+        width: 800px;
+        height: 600px;
         image-rendering: pixelated;
-        background: #000;
+        cursor: none;
       }
-      #log {
-        position: fixed;
-        left: 8px;
-        bottom: 8px;
-        max-width: 46ch;
-        max-height: 30vh;
-        overflow: auto;
-        color: #9be89b;
-        font: 11px/1.35 ui-monospace, monospace;
-        white-space: pre-wrap;
-        pointer-events: none;
-        text-shadow: 0 1px 0 #000;
-        opacity: 0.85;
+      #fallback {
+        display: none;
+        position: absolute;
+        inset: 0;
+        padding: 36px;
+        background: #06142c;
+        color: #dff0ff;
+        font: 15px/1.6 system-ui, sans-serif;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
       }
     </style>
   </head>
   <body>
-    <canvas id="screen" width="800" height="600"></canvas>
-    <div id="log"></div>
-    <script type="module" src="/build/main.js"></script>
+    <div id="frame">
+      <canvas id="screen" width="800" height="600"></canvas>
+      <div id="fallback"></div>
+    </div>
+    <script type="module" src="/build/main.js?v=57"></script>
   </body>
 </html>

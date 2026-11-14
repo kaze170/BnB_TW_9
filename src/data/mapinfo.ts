@@ -37,14 +37,7 @@ export interface MapInfo {
   description: string;
   /** Map family, e.g. `Bula`.  `Random` entries pick within their family. */
   family: string;
-  /**
-   * Art family, e.g. `Bula`.
-   *
-   * NOTE: this is *not* a sprite name.  `Map/<name>` in Fx is the map's
-   * attribute block (its tail carries strings such as "InnerSoul"), not an
-   * image, and there is no thumbnail sheet anywhere in Cx or Fx.  The lobby
-   * therefore shows the map *name* only and does not invent art for it.
-   */
+  /** Fx `Theme/<art>` sheet: frame 0 is the thumbnail, frame 1 the game HUD icon. */
   art: string;
   /** Packed colour as stored (0xRRGGBB). */
   colour: number;
@@ -52,6 +45,17 @@ export interface MapInfo {
   theme: number;
   /** `Random`/`…Random` entries are random-choice placeholders, not playable maps. */
   random: boolean;
+  /** Minimum level to select (`*(entry + 60)` `sub_47FD8A`). */
+  minLevel?: number;
+  /** Retail NEW map flag (`*(entry + 68) == 1` `sub_47FBC9` -> `Theme/Newmap_Icon`). */
+  isNew?: boolean;
+}
+
+export interface MapInfoEntry {
+  readonly code: string;
+  readonly displayName: string;
+  readonly maxPlayers: number;
+  readonly description: string;
 }
 
 export interface MapInfoFile {
@@ -97,11 +101,11 @@ export function parseMapInfo(payload: Uint8Array): MapInfoFile | null {
       u8();
       const family = str();
       const art = str();
-      u8();
+      const minLevel = u8();
       u8();
       const colour = readU32(payload, off);
       off += 4;
-      u8();
+      const flagNew = u8();
       u8();
       u8();
       const theme = readU32(payload, off);
@@ -115,6 +119,8 @@ export function parseMapInfo(payload: Uint8Array): MapInfoFile | null {
         colour,
         theme,
         random: /Random$/i.test(name),
+        minLevel,
+        isNew: flagNew === 1,
       });
     }
   } catch {
@@ -124,6 +130,26 @@ export function parseMapInfo(payload: Uint8Array): MapInfoFile | null {
   // alignment and the parse is not trustworthy.
   if (off !== payload.length) return null;
   return { count, maps };
+}
+
+/** Add archive maps omitted from the retail selection table. Both server and
+ * client must derive identical stable IDs from the same index. These extra IDs
+ * and labels are web additions, not original fxdynmapinfo records. */
+export function includeArchiveMaps(info: MapInfoFile, archiveNames: readonly string[]): MapInfoFile {
+  const maps = [...info.maps];
+  const seen = new Set(maps.map(m => m.name.toLowerCase()));
+  const extra = archiveNames
+    .map(name => /^Map[\\/](.+)$/i.exec(name)?.[1])
+    .filter((name): name is string => !!name && !name.includes("/") && !name.includes("\\"))
+    .sort((a, b) => a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0);
+  let next = Math.max(0, ...maps.map(m => m.index)) + 1;
+  for (const name of extra) {
+    if (seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    const family = name.replace(/\d+$/, "") || name;
+    maps.push({ index: next++, name, description: name, family, art: family, colour: 0, theme: 0xffffffff, random: false });
+  }
+  return { count: maps.length, maps };
 }
 
 /** ASCII helper used by the tooling, kept here so both sides agree. */
